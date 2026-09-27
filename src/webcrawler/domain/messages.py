@@ -1,22 +1,9 @@
-"""The queue's message type and its overflow signal.
-
-`BaseMessage` is the only thing that crosses the queue boundary, so it carries
-both the payload and the routing key. Partitioning is by `hash(url)`
-(goal.md:113), which the poller supplies and the producer routes with
-`partition_key % partition_count`.
-"""
-
 from dataclasses import dataclass
 
 from webcrawler.domain.custom_url import CustomURL
 
 class QueueOverflowError(RuntimeError):
-    """Raised when an enqueue would exceed the deque max size (goal.md:117).
-
-    A `RuntimeError` and not a bespoke base class: running out of capacity is a
-    property of the live queue, not a fault in the caller's arguments, and the
-    bulk API reports the identical condition as a `False` result instead of
-    raising.
+    """Raised when an enqueue would exceed the deque max size (goal.md).
 
     Args:
     message: The reason the enqueue was rejected.
@@ -33,9 +20,8 @@ class BaseMessage:
     Args:
     url: The URL to crawl. Its identity is the canonical form, so the
     message compares and hashes stably across producers.
-    partition_key: The routing key, `hash(url)` (goal.md:113), stored
-    verbatim. A Python `%` against a positive modulus is already
-    non-negative, so routing needs no normalization here.
+    partition_key: The routing key, `hash(url)` (goal.md), stored
+    verbatim. 
     """
 
     url: CustomURL

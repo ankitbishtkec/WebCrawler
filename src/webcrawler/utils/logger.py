@@ -1,5 +1,4 @@
-"""The console logger: one stdlib stream handler, set up once at startup.: every major class takes a `logging.Logger`, `log.debug` for
-detail and `log.info` otherwise. `main.py` calls `configure_logging` first.
+"""The console logger: one stdlib stream handler, set up once at startup.: every major class takes a `logging.Logger`, `log.debug` for detail, `log.info` only for a fetched URL and its found links, and `log.warning`/`log.error` for a degraded or failed step. `main.py` calls `configure_logging` first.
 """
 
 import logging

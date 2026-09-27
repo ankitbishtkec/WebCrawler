@@ -30,7 +30,7 @@ import sqlite3
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TypeVar
+from typing import Final, TypeVar
 
 import aiosqlite
 
@@ -44,6 +44,21 @@ from webcrawler.ports.url_state_repository import URLStateRepository
 T = TypeVar("T")
 
 Parameters = dict[str, object]
+
+# `:started_state` and `:now` are bound by every chunk, so only the remainder of
+# the parameter budget is available for the `:uN` URL placeholders.
+MARK_STARTED_RESERVED_PARAMETERS: Final = 2
+
+# The crawl-queue's statement widened to the caller's `IN (...)` list, so the
+# columns and the stored values still come from one place. Every chunk fills
+# `{url_placeholders}` and reuses the same `:started_state` and `:now`.
+MARK_STARTED_BATCH_SQL: Final = models.MARK_STARTED_SQL.replace(
+    "WHERE custom_url = :custom_url", "WHERE custom_url IN ({url_placeholders})"
+)
+
+MAX_MARK_STARTED_URLS: Final = max(
+    1, models.MAX_BOUND_PARAMETERS - MARK_STARTED_RESERVED_PARAMETERS
+)
 
 
 def _timeout_seconds(timeout: timedelta) -> int:
@@ -84,7 +99,7 @@ class SQLiteURLStateRepository(URLStateRepository):
         time_provider: The only source of "now" for a write, so
             `goal.md:27`'s `created_time == next_crawl_time` is the
             application's guarantee and never a coincidence of two clocks.
-        logger: The injected logger. The schema creation is INFO, each claim
+        logger: The injected logger. The schema creation is DEBUG, each claim
             batch is DEBUG, and a retried statement is DEBUG.
     """
 
@@ -272,33 +287,98 @@ class SQLiteURLStateRepository(URLStateRepository):
             return []
         return await self._claim(urls, now, max_items, job_timeout, queue_timeout)
 
-    async def mark_started(self, url: CustomURL, now: datetime) -> None:
-        """Record that a worker has begun crawling one URL.
+    async def mark_started(self, urls: list[CustomURL], now: datetime) -> None:
+        """Record that workers have begun crawling the given URLs.
 
         This is the only writer of `last_crawl_time`, deliberately overriding
         the older plan that put it in the completion transaction, because it
-        records the attempt rather than the outcome. The row stays
-        claimable while the attempt runs: a worker that dies before writing a
-        completion leaves the row `started_crawl`, and the `job_timeout` branch
-        reclaims it (goal.md:82-83).
+        records the attempt rather than the outcome. The rows stay
+        claimable while the attempts run: a worker that dies before writing a
+        completion leaves them `started_crawl`, and the `job_timeout` branch
+        reclaims them (goal.md:82-83).
+
+        A whole batch is one `UPDATE ... WHERE custom_url IN (...)` inside one
+        transaction, so the worker's task group marks its URLs together instead
+        of one statement each. An empty list is a no-op that issues no
+        statement, because `IN ()` is rejected outright by some engines.
 
         Args:
-            url: The URL being crawled.
+            urls: The URLs being crawled, all of which the store already holds.
             now: The attempt time, in UTC.
 
         Raises:
             sqlite3.Error: If the update cannot be committed, in which case
-                the row is not marked and stays claimable.
+                the rows are not marked and stay claimable.
         """
+        if not urls:
+            return
         await self._open()
+        await self._transaction(lambda: self._mark_started_chunks(urls, now))
+
+    async def _mark_started_chunks(
+        self, urls: Sequence[CustomURL], now: datetime
+    ) -> None:
+        """Mark every chunk of the caller's list inside the open transaction.
+
+        All chunks share one `BEGIN IMMEDIATE` … `COMMIT`, so a chunked batch is
+        as atomic as a single-statement one.
+
+        Args:
+            urls: The caller's URLs, non-empty.
+            now: The attempt time, in UTC, bound to every chunk.
+        """
+        for chunk in self._mark_started_chunks_of(urls):
+            await self._run(*self._mark_started_statement(chunk, now))
+        self._logger.debug(
+            "marked %d url(s) started at %s",
+            len(urls),
+            now.isoformat(),
+        )
+
+    def _mark_started_chunks_of(
+        self, urls: Sequence[CustomURL]
+    ) -> list[Sequence[CustomURL]]:
+        """Split the caller's URLs into statement-sized chunks.
+
+        One statement cannot bind more placeholders than SQLite allows
+        parameters, so a long caller list becomes several statements, the same
+        way the claim chunks its list.
+
+        Args:
+            urls: The caller's URLs, non-empty.
+
+        Returns:
+            list[Sequence[CustomURL]]: One entry per statement to issue.
+        """
+        return [
+            urls[start : start + MAX_MARK_STARTED_URLS]
+            for start in range(0, len(urls), MAX_MARK_STARTED_URLS)
+        ]
+
+    def _mark_started_statement(
+        self, chunk: Sequence[CustomURL], now: datetime
+    ) -> tuple[str, Parameters]:
+        """Bind one batch mark-started statement.
+
+        Args:
+            chunk: The URLs this statement may mark, non-empty.
+            now: The attempt time, in UTC.
+
+        Returns:
+            tuple[str, Parameters]: The statement text, carrying one `:uN` per
+                URL, and the values to bind by name.
+        """
+        names = models.url_parameter_names(chunk)
+        statement = MARK_STARTED_BATCH_SQL.format(
+            url_placeholders=", ".join(f":{name}" for name in names)
+        )
         parameters: Parameters = {
-            "custom_url": url.get_url(),
             "started_state": CrawlState.STARTED_CRAWL.value,
             "now": now,
         }
-        await self._transaction(
-            lambda: self._run(models.MARK_STARTED_SQL, parameters)
-        )
+        for name, url in zip(names, chunk):
+            parameters[name] = url.get_url()
+        return statement, parameters
 
     async def complete_crawl(
         self,
@@ -470,7 +550,7 @@ class SQLiteURLStateRepository(URLStateRepository):
         for statement in models.SCHEMA_STATEMENTS:
             await self._run(statement)
         await self._migrate_times_crawled()
-        self._logger.info(
+        self._logger.debug(
             "url state schema created or already present at %s on SQLite %s",
             self._db_path,
             sqlite3.sqlite_version,
@@ -494,7 +574,7 @@ class SQLiteURLStateRepository(URLStateRepository):
         if "times_crawled" in columns:
             return
         await self._run(models.MIGRATE_TIMES_CRAWLED_SQL)
-        self._logger.info(
+        self._logger.debug(
             "migrated %s at %s: added times_crawled",
             models.URLS_TABLE,
             self._db_path,

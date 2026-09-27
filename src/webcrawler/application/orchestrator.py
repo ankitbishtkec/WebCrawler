@@ -1,25 +1,17 @@
 """The orchestrator: the one owner of the crawl loop's lifetime (goal.md:13).
 
-`goal.md:13` asks for one module that runs all the others on a single asyncio
+One module that runs all the others on a single asyncio
 event loop. This class creates exactly one poller task (`goal.md:107`) and one
 worker task, and is the only place either is created or stopped. Every
 collaborator arrives injected, so the choice of concrete classes is the
 composition root's (`main.py`) and this class decides only when
 things run.
 
-Two decisions carry the design:
-
-- The seed is read once by `main.py` before any task exists and arrives as a
-string, so no second seed can be set. It is validated as one `CustomURL`,
-never split on commas, then inserted and queued.
-- The tasks are created only after the seed is queued, which makes "exactly
-one poller task" (`goal.md:107`) structural rather than conventional, and
 `run` is wrapped in `try/finally` so a `Ctrl+C` during the seed read
 still closes the store — which joins the aiosqlite thread.
 """
 
 import asyncio
-import contextlib
 import logging
 
 from webcrawler.application.url_poller import URLPoller
@@ -27,11 +19,44 @@ from webcrawler.application.worker import CrawlerWorker
 from webcrawler.domain.custom_url import CustomURL, InvalidURLError
 from webcrawler.ports.url_state_repository import URLStateRepository
 
+
+async def _settle(task: asyncio.Task[None]) -> None:
+    """Wait for one task this class created, absorbing whatever it raised.
+
+    Args:
+    task: The task to wait for, which may be cancelled, failed, or finished.
+
+    Raises:
+    Exception: Nothing is raised
+    """
+    # `asyncio.wait` never re-raises what the task raised, so a task
+    # re-delivering an error the caller is already propagating cannot skip
+    # the shutdown that follows.
+    await asyncio.wait([task])
+    if not task.cancelled():
+        # Retrieved, so asyncio does not warn about a failure nobody looked at.
+        task.exception()
+
+
+def _unwrapped(failures: ExceptionGroup) -> BaseException:
+    """Return the one failure a task group reports, so it can be re-raised.
+
+    Args:
+    failures: The group the task group raised, holding one or more failures.
+
+    Returns:
+    BaseException: The single underlying failure, or the group itself when a
+    task really did fail more than once.
+    """
+    if len(failures.exceptions) == 1:
+        return failures.exceptions[0]
+    return failures
+
 class Orchestrator:
-    """Runs the crawl's two long-lived tasks on one event loop (goal.md:13).
+    """Runs the crawl's two long-lived tasks on one event loop (goal.md).
 
     No project base: this class composes ports and owns a lifetime, and
-    nothing is shared with it by inheritance ( goal.md:8). The
+    nothing is shared with it by inheritance ( goal.md). The
     seed-once flow is the whole of its behaviour: read one line, make it a
     row, hand it to the queue, then run the poller and the worker until the
     run is interrupted.
@@ -44,9 +69,8 @@ class Orchestrator:
     worker: The crawl consumer, started once the seed is queued.
     seed_line: The operator's single seed URL, read before any task
     starts, so the crawl never runs without one.
-    logger: The injected logger. A seed that cannot start the crawl is
-    INFO, because an ended session is the operator's next decision,
-    not an error condition.
+    logger: The injected logger. A missing seed is DEBUG, a rejected one is
+    WARNING, and an unrecordable one is ERROR.
     """
 
     def __init__(
@@ -82,20 +106,23 @@ class Orchestrator:
         because the queuer claims rows that must already exist.
         
         The two tasks are created only after the seed is queued, so exactly
-        one poller task can exist (`goal.md:107`) and no task runs with
+        one poller task can exist (`goal.md`) and no task runs with
         nothing to crawl. The crawl then runs until `Ctrl+C`: the await is
         wrapped in `try/finally`, which cancels and awaits both tasks and
         then awaits `repository.close`, so no task or connection thread is
         left running.
         
         An invalid seed, or an exception from `create_urls` or `enqueue_urls`
-        (an exhausted DB retry), is logged at INFO and the session ends,
-        because with no seed there is nothing to crawl.
-        
-        One `asyncio.gather` awaits both tasks, so either ending — cancelled
-        or failed — takes the other with it rather than leaving a dead task
-        and a silently stopped crawl.
-        
+        (an exhausted DB retry), is logged as WARNING or ERROR and the session
+        ends, because with no seed there is nothing to crawl.
+
+        One `asyncio.TaskGroup` awaits both tasks, so either ending — cancelled
+        or failed — takes the other with it rather than leaving a dead task and
+        a silently stopped crawl. The group re-raises a task's failure wrapped
+        in an `ExceptionGroup`, so a lone failure is unwrapped and re-raised as
+        itself, which keeps `KeyboardInterrupt` and `CancelledError` on their
+        own unwrapped path.
+
         Raises:
         asyncio.CancelledError: When the run is interrupted; both tasks
         and the store are already closed by then.
@@ -107,7 +134,7 @@ class Orchestrator:
         try:
             seed_line = self._seed_line
             if not seed_line:
-                self._logger.info(
+                self._logger.debug(
                     "no seed URL was entered, so there is nothing to crawl "
                     "and the session ends"
                     )
@@ -115,7 +142,7 @@ class Orchestrator:
             try:
                 seed = CustomURL(seed_line)
             except InvalidURLError as error:
-                self._logger.info(
+                self._logger.warning(
                     "the seed %r was rejected as a single URL, so there "
                     "is nothing to crawl and the session ends: %s",
                     seed_line,
@@ -127,25 +154,35 @@ class Orchestrator:
                 # must already exist.
                 await self._poller.enqueue_urls([seed])
             except Exception as error:
-                self._logger.info(
+                self._logger.error(
                     "the seed %s could not be recorded or queued, so there "
                     "is nothing to crawl and the session ends: %s",
                     seed.get_url(),
                     error)
                 return
-            self._logger.info(
+            self._logger.debug(
                 "the crawl is running from the seed %s; interrupt it to stop",
                 seed.get_url())
-            poller_task = asyncio.create_task(self._poller.run())
-            worker_task = asyncio.create_task(self._worker.run())
-            await asyncio.gather(poller_task, worker_task)
+            try:
+                async with asyncio.TaskGroup() as group:
+                    poller_task = group.create_task(self._poller.run())
+                    worker_task = group.create_task(self._worker.run())
+            except ExceptionGroup as failures:
+                error = _unwrapped(failures)
+                self._logger.error(
+                    "a crawl task failed, so the crawl is over: %s", error)
+                # `from None`: the group only wrapped the failure just logged,
+                # so the traceback shows the cause rather than the wrapper too.
+                raise error from None
         finally:
             for task in (poller_task, worker_task):
-                if task is not None and not task.done:
+                if task is not None and not task.done():
                     task.cancel()
             tasks = [task for task in (poller_task, worker_task) if task is not None]
             if tasks:
-                # return_exceptions: a task re-delivering the error this try
-                # is already propagating must not skip the close below.
-                await asyncio.gather(*tasks, return_exceptions=True)
+                # A task re-delivering the error this try is already propagating
+                # must not skip the close below, so `_settle` absorbs it.
+                async with asyncio.TaskGroup() as group:
+                    for task in tasks:
+                        group.create_task(_settle(task))
             await self._repository.close()

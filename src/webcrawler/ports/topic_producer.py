@@ -30,12 +30,20 @@ class TopicProducer(ABC):
     """
 
     @abstractmethod
-    async def enqueue(self, message: BaseMessage) -> None:
+    async def enqueue(self, message: BaseMessage, request_id: str | None = None) -> bool:
         """Append one message to the tail of the queue.
 
         Args:
-            message: The message to enqueue, carrying the URL and the
-                `partition_key`, which is stored verbatim and not routed.
+        message: The message to enqueue, carrying the URL and the
+            `partition_key`, which is stored verbatim and not routed.
+        request_id: Optional id making the call idempotent. The shipped queue
+            is in-memory and its operations are not retried, so no id is ever
+            sent twice and nothing is deduplicated today. It is here as the
+            extension point for a networked broker, where a retried send would
+            otherwise duplicate the message.
+
+        Returns:
+            bool: True when the message was enqueued.
 
         Raises:
             QueueOverflowError: If the queue already holds `max_size`
@@ -43,7 +51,9 @@ class TopicProducer(ABC):
         """
 
     @abstractmethod
-    async def enqueue_many(self, messages: list[BaseMessage]) -> list[bool]:
+    async def enqueue_many(
+        self, messages: list[BaseMessage], request_id: str | None = None
+    ) -> list[bool]:
         """Enqueue a batch, reporting one outcome per input message.
 
         No dedupe: the caller owns that, because only the caller knows
@@ -55,9 +65,28 @@ class TopicProducer(ABC):
 
         Args:
             messages: The batch to enqueue, in the order given.
+            request_id: Optional id making the whole call idempotent. Not used
+                today, for the same reason as in `enqueue`; on a networked
+                broker a retried send would otherwise duplicate the batch.
 
         Returns:
             list[bool]: One result per input message, in the same order;
                 True where the message was enqueued, False where it
                 overflowed.
+        """
+
+    @abstractmethod
+    async def enqueue_to_deadletter(
+        self, message: BaseMessage, request_id: str | None = None
+    ) -> bool:
+        """Park a message that failed and must not be retried.
+
+        Args:
+        message: The message to park, carrying the URL it was for.
+        request_id: Optional id making the call idempotent, unused today as
+            in `enqueue`.
+
+        Returns:
+            bool: True when the message was parked, False when the deadletter
+                queue is full and the message is dropped.
         """

@@ -42,14 +42,18 @@ class TopicReader(ABC):
         """
 
     @abstractmethod
-    async def commit(self, items: list[BaseMessage]) -> None:
-        """Remove `min(len(items), available)` items from the head.
+    async def commit(self, messages: list[BaseMessage], request_id: str | None = None) -> None:
+        """Remove `min(len(messages), available)` items from the head.
 
-        Head-based and non-idempotent: committing the same batch twice
-        removes twice as many, which is safe only because the shipped run
-        path has exactly one reader (plan.md:299).
+        Head-based: committing the same batch twice removes twice as many, so
+        a retried commit takes more than it should. The shipped queue is
+        in-memory and its operations are not retried, so nothing is
+        deduplicated today. `request_id` is the extension point for a networked
+        broker, where that retried removal would matter.
 
         Args:
-            items: The batch being acknowledged. Only its count is used, so
+            messages: The batch being acknowledged. Only its count is used, so
                 a batch larger than the deque cannot underflow it.
+            request_id: Optional id making the call idempotent, unused today
+                for the reason given above.
         """

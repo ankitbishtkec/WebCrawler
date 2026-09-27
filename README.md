@@ -28,7 +28,7 @@ To inspect the resulting database file, install `sqlite-utils`:
 # urls which have been crawled more than once, should have zero rows in crawlme.monzo.com hostname
 .venv\Scripts\python -m sqlite_utils query webcrawler.db "select * from urls where times_crawled > 1 order by last_status_update_time asc limit 10 offset 1" --table
 # Per-state summary: row counts plus the oldest/newliest status and crawl times.
-.venv\Scripts\python -m sqlite_utils query webcrawler.db "select state, count(*) as n, min(last_status_update_time) as oldest_status, max(last_status_update_time) as newest_status, min(last_crawl_time) as first_crawl, max(last_crawl_time) as last_crawl from urls group by state" --table
+.venv\Scripts\python -m sqlite_utils query webcrawler.db "select state, count(*) as n, min(last_status_update_time) as oldest_status, max(last_status_update_time) as newest_status, min(last_crawl_time) as first_crawl, max(last_crawl_time) as last_crawl, min(times_crawled), max(times_crawled) from urls group by state" --table
 ```
 
 ## What it does

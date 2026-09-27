@@ -1,6 +1,6 @@
 """Errors that tell the retry policy a failure must not be retried.
 
-`goal.md:17` requires every I/O implementation to own its retry, but retrying
+`goal.md` requires every I/O implementation to own its retry, but retrying
 everything is wrong: a site that answers 503, or 404, has given a final answer
 for that request, and spending backoff on it only slows the crawl down. The
 operation knows the difference, so the operation says it by raising

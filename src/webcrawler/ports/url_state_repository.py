@@ -187,16 +187,17 @@ class URLStateRepository(ABC):
         """
 
     @abstractmethod
-    async def mark_started(self, url: CustomURL, now: datetime) -> None:
-        """Record that an attempt on url begins now.
+    async def mark_started(self, urls: list[CustomURL], now: datetime) -> None:
+        """Record that attempts on the given URLs begin now.
 
         This writes the attempt time rather than the outcome, so the row stays
         claimable while the attempt runs: a worker that dies before writing a
         result leaves a `started_crawl` row that `job_timeout` reclaims
-        (goal.md:39-45).
+        (goal.md:39-45). The whole batch is updated in a single statement.
 
         Args:
-            url: The URL being crawled, which the store must already hold.
+            urls: The URLs being crawled, all of which the store must already
+                hold. An empty list issues no statement at all.
             now: The attempt time, in UTC.
 
         Raises:

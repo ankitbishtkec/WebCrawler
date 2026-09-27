@@ -1,4 +1,4 @@
-"""Canonical URL value type (goal.md:131-132).
+"""Canonical URL value type (goal.md).
 
 The standard library is the only URL implementation used, and `urlsplit` is
 the sole authority on what parses; this module only adds crawl-specific
@@ -22,9 +22,6 @@ from urllib.parse import parse_qsl, urlencode, urlsplit
 class InvalidURLError(ValueError):
     """Raised when a string is not a valid crawlable URL.
 
-    One type for every rejection reason, so the console seed path reports any
-    bad line through a single `except InvalidURLError`.
-
     Args:
         message: The reason the input was rejected.
     """
@@ -36,11 +33,7 @@ class CustomURL:
     Stores the scheme, the hostname, the port, the path, and a sorted tuple
     of query pairs; the fragment and a scheme-default port are discarded at
     construction. Identity is therefore exactly scheme + hostname + port +
-    path + query string (goal.md:131).
-
-    Hostname scope is deliberately not enforced here: a URL is judged on its
-    own merits, and dropping off-host links is the link extractor's job
-    (goal.md:142).
+    path + query string (goal.md).
 
     Args:
         raw: An absolute `http` or `https` URL string.
@@ -89,6 +82,7 @@ class CustomURL:
         self._path = parts.path
         # sorted is stable, so equal keys keep their input order and a
         # repeated key survives as two pairs.
+        #ankit: should first sort by key, if keys are equal then value is used for sorting. this is a bug here 
         self._query = tuple(sorted(pairs, key=lambda pair: pair[0]))
 
     @property

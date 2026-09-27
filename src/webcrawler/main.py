@@ -42,8 +42,6 @@ from webcrawler.infrastructure.retry.exponential_backoff_retry_policy import (
 from webcrawler.infrastructure.time.system_time_provider import SystemTimeProvider
 from webcrawler.ports.request_middleware import RequestMiddleware
 from webcrawler.utils.logger import configure_logging
-from webcrawler.utils.in_memory_request_id_deduplicator import (
-    InMemoryRequestIdDeduplicator)
 
 # The values a deployment overrides; each one is a constructor argument below.
 DB_FILE: str = "webcrawler.db"
@@ -100,7 +98,6 @@ async def main() -> None:
     retry_policy = ExponentialBackoffRetryPolicy(RETRY_SETTINGS)
     repository = SQLiteURLStateRepository(DB_FILE, retry_policy, time_provider, logger)
     await repository.initialize()
-    dedupe = InMemoryRequestIdDeduplicator()
     # The only source of request headers, applied in order; an auth middleware
     # belongs here too (README's Extensions section).
     request_middlewares: tuple[RequestMiddleware, ...] = (
@@ -118,7 +115,6 @@ async def main() -> None:
         producer,
         job_timeout=JOB_TIMEOUT,
         queue_timeout=QUEUE_TIMEOUT,
-        dedupe=dedupe,
         time_provider=time_provider,
         logger=logger)
     worker = CrawlerWorker(
@@ -129,6 +125,7 @@ async def main() -> None:
         politeness_policy,
         poller,
         retry_policy,
+        producer=producer,
         batch_size=BATCH_SIZE,
         reschedule_delay=RESCHEDULE_DELAY,
         sleep_threshold_ms=SLEEP_THRESHOLD_MS,

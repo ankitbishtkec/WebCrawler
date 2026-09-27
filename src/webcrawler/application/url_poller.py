@@ -15,10 +15,10 @@ line of code:
   claim's timeout predicates cannot double-claim a row; the lock here solves
   a different problem, `goal.md:107`: an API call must not interleave with a
   periodic poll, so the two never issue overlapping claims or feeds.
-- The dedupe gate is entered once per request, before the claim. The
-  repository owns retries for its own I/O (goal.md:17), so an internal
-  retry re-enters only the claim, never the gate, which is what keeps a
-  retried check from growing the queue (goal.md:100).
+- No dedupe gate. The queue's operations are not retried, so no request id is
+  ever sent twice; the optional `request_id` on the ports stays as the
+  extension point for a networked broker, where a retried send would
+  otherwise duplicate the message.
 - The first poll runs immediately and each later poll one
   `periodic_fetch_seconds` after the previous claim, so a crawl that starts
   with due rows queues them without first waiting out an interval.
@@ -32,7 +32,6 @@ from datetime import datetime, timedelta
 from webcrawler.domain.custom_url import CustomURL
 from webcrawler.domain.messages import BaseMessage
 from webcrawler.ports.crawl_queuer import CrawlQueuer
-from webcrawler.ports.request_deduplicator import RequestDeduplicator
 from webcrawler.ports.time_provider import TimeProviderFactory
 from webcrawler.ports.topic_producer import TopicProducer
 from webcrawler.ports.url_state_repository import URLStateRepository
@@ -60,13 +59,11 @@ class URLPoller(CrawlQueuer):
         job_timeout: The `started_crawl` staleness timeout, shared with every
             claim so the poller and the store agree on one predicate.
         queue_timeout: The `queued` staleness timeout, which is also how a
-            row whose queue send was rejected is recovered by a later poll.
-        dedupe: Records poll-check and request ids, so a retried request
-            cannot grow the queue (goal.md:100).
+        row whose queue send was rejected is recovered by a later poll.
         time_provider: The only source of "now" for a claim, so a poll's
-            instant is the application's guarantee rather than a second
-            clock's.
-        logger: The injected logger. A rejected enqueue is INFO, because the
+        instant is the application's guarantee rather than a second
+        clock's.
+        logger: The injected logger. A rejected enqueue is WARNING, because the
             row's recovery depends on a later poll seeing it.
     """
 
@@ -80,7 +77,6 @@ class URLPoller(CrawlQueuer):
         max_items_to_queue: int = -1,  # goal.md:59 default: no limit
         job_timeout: timedelta,
         queue_timeout: timedelta,
-        dedupe: RequestDeduplicator,
         time_provider: TimeProviderFactory,
         logger: logging.Logger,
     ) -> None:
@@ -94,7 +90,6 @@ class URLPoller(CrawlQueuer):
             max_items_to_queue: The `queue_candidates` fallback row limit.
             job_timeout: The `started_crawl` staleness timeout.
             queue_timeout: The `queued` staleness timeout.
-            dedupe: The poll-check and request id dedupe.
             time_provider: The only source of "now".
             logger: The injected logger.
         """
@@ -105,7 +100,6 @@ class URLPoller(CrawlQueuer):
         self._max_items_to_queue = max_items_to_queue
         self._job_timeout = job_timeout
         self._queue_timeout = queue_timeout
-        self._dedupe = dedupe
         self._time_provider = time_provider
         self._logger = logger
         self._lock = asyncio.Lock()
@@ -117,12 +111,9 @@ class URLPoller(CrawlQueuer):
         `periodic_fetch_seconds` after the previous claim, so a crawl that
         starts with due rows queues them without waiting out an interval.
 
-        Each poll mints a fresh poll-check id and passes it through the dedupe
-        gate exactly once, immediately before the claim: the repository
-        retries its own I/O internally (goal.md:17), and those retries
-        re-enter only the claim, never the gate, so a retried check cannot
-        grow the queue (goal.md:100). Queue growth is bounded by the single
-        `enqueue_many` issued for the rows the one claim returned.
+        Each poll mints a fresh request id and hands it to the one bulk feed
+        for the rows the claim returned, so a networked broker could make that
+        feed idempotent. Queue growth is bounded by that single `enqueue_many`.
 
         Raises:
             Exception: Whatever a claim or the bulk feed raises, propagated
@@ -152,26 +143,21 @@ class URLPoller(CrawlQueuer):
         urls: list[CustomURL] | None = None,
         max_items: int = -1,
     ) -> None:
-        """Dedupe one request, claim its rows, and feed them in one bulk call.
+        """Claim this request's rows and feed them in one bulk call.
 
         The caller must already hold `_lock`: this method is the shared body
         of the three entry points and exists precisely so none of them
         reacquires the non-re-entrant lock.
-
-        The dedupe gate is entered exactly once, before any claim, so a retry
-        inside the repository re-enters only the claim and a retried request
-        cannot grow the queue (goal.md:100). A skipped request returns without
-        touching the store or the topic.
 
         The bulk feed is issued even for an empty claim: one code path, so an
         empty poll costs the same single call a full one does and the
         producer's result list stays the only place a per-row outcome exists.
 
         Args:
-            request_id: The dedupe key, or None to mint one here. Only `run`
-                supplies a stable id, one per poll check; the APIs default to
-                a fresh id, because a caller retrying without an id is a
-                genuinely new request, not a repeat.
+            request_id: The id handed to the bulk feed, or None to mint one
+                here. Only `run` supplies a stable id, one per poll check; the
+                APIs default to a fresh id, because a caller retrying without
+                an id is a genuinely new request, not a repeat.
             now: The instant the claim's predicates are evaluated against.
             urls: The caller's own URLs, or None to claim candidates. A
                 caller's list is already the batch, so `enqueue_urls` passes
@@ -186,11 +172,6 @@ class URLPoller(CrawlQueuer):
         """
         if request_id is None:
             request_id = uuid.uuid4().hex
-        # The gate is entered once, before the claim: a repository-internal
-        # retry re-enters only the claim (goal.md:100).
-        if self._dedupe.seen_and_record(request_id):
-            self._logger.debug("skipping request %s: already seen", request_id)
-            return
         if urls is None:
             rows = await self._repository.claim_candidates(
                 now,
@@ -209,11 +190,12 @@ class URLPoller(CrawlQueuer):
         # partition_key is hash(url), stored verbatim: a negative key already
         # routes non-negatively under the producer's modulo (goal.md:113).
         results = await self._producer.enqueue_many(
-            [BaseMessage(url, partition_key=hash(url)) for url in rows]
+            [BaseMessage(url, partition_key=hash(url)) for url in rows],
+            request_id,
         )
         for url, enqueued in zip(rows, results):
             if not enqueued:
-                self._logger.info(
+                self._logger.warning(
                     "queueing %s was rejected, so it stays queued and the "
                     "first poll %s from now re-claims it",
                     url.get_url(),
@@ -232,7 +214,8 @@ class URLPoller(CrawlQueuer):
         Args:
             urls: The URLs to queue, expected to exist as rows already, which
                 is why this claims and never inserts.
-            request_id: The dedupe key, or None to mint a fresh id inside.
+            request_id: The id handed to the bulk feed, or None to mint a
+                fresh one inside.
 
         Raises:
             Exception: Whatever the claim or the bulk feed raises, propagated
@@ -258,7 +241,8 @@ class URLPoller(CrawlQueuer):
             now: The instant the claim's predicates are evaluated against.
             max_items: This call's row limit, or None to fall back to
                 `max_items_to_queue` (`goal.md:59`).
-            request_id: The dedupe key, or None to mint a fresh id inside.
+            request_id: The id handed to the bulk feed, or None to mint a
+                fresh one inside.
 
         Raises:
             Exception: Whatever the claim or the bulk feed raises, propagated

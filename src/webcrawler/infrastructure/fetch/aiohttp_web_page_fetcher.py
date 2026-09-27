@@ -56,8 +56,8 @@ class AiohttpWebPageFetcher(WebPageFetcher):
     `aiohttp.ClientTimeout(total=...)`. It is
     `RetrySettings.timeout_seconds`, so an attempt the policy abandons
     still ends on its own instead of holding a socket for ever.
-    logger: The injected logger. Every attempt is recorded at INFO, which is
-    what `goal.md:141` asks for.
+    logger: The injected logger. An attempt is DEBUG, a failure is ERROR, and
+        a success is INFO.
     session_factory: Builds one session per `fetch` call as an async context
     manager. The default opens a real `aiohttp.ClientSession`; tests
     inject a fake so no socket is ever opened.
@@ -160,7 +160,7 @@ class AiohttpWebPageFetcher(WebPageFetcher):
                 transient and so is retried.
                 OSError: For a failure raised below the client.
                 """
-                self._logger.info("fetch attempt for %s", target)
+                self._logger.debug("fetch attempt for %s", target)
                 # The built-in agent goes first so an unauthenticated crawl is
                 # still identified; a middleware may override it.
                 headers: dict[str, str] = {"User-Agent": DEFAULT_USER_AGENT}
@@ -178,7 +178,7 @@ class AiohttpWebPageFetcher(WebPageFetcher):
                             encoding=BODY_ENCODING, errors="replace"
                         )
                 except Exception as error:  # noqa: BLE001 - logged, then re-raised
-                    self._logger.info(
+                    self._logger.error(
                         "fetch of %s failed: %s: %s",
                         target,
                         type(error).__name__,

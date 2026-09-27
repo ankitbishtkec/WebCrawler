@@ -50,7 +50,7 @@ class InMemoryTopicReader(TopicReader):
         self._consumer_group_id = consumer_group_id
         self._queue = queue
         self._logger = logger
-        self._logger.info(
+        self._logger.debug(
             "reading topic %s as group %s", topic, consumer_group_id
             )
 
@@ -66,15 +66,19 @@ class InMemoryTopicReader(TopicReader):
         """
         return self._queue.peek(n)
 
-    async def commit(self, items: list[BaseMessage]) -> None:
-        """Remove `min(len(items), available)` items from the head.
+    async def commit(
+        self, messages: list[BaseMessage], request_id: str | None = None
+    ) -> None:
+        """Remove `min(len(messages), available)` items from the head.
 
         Head-based and non-idempotent: committing the same batch twice
         removes twice as many, which is safe only because the shipped run
         path has exactly one reader.
 
         Args:
-        items: The batch being acknowledged. Only its count is used, so
+        messages: The batch being acknowledged. Only its count is used, so
         a batch larger than the deque cannot underflow it.
+        request_id: Accepted and ignored: this in-memory queue is never
+        retried, so no commit is repeated and nothing is deduplicated.
         """
-        self._queue.commit(len(items))
+        self._queue.commit(len(messages))
