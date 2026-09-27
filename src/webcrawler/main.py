@@ -89,7 +89,7 @@ async def main() -> None:
         "Enter the seed URL to crawl, then press Ctrl+C at any time to "
         "stop."
         )
-    seed_line = input("seed url> ").strip
+    seed_line = input("seed url> ").strip()
     time_provider = SystemTimeProvider()
     # One queue behind both views: the poller must fill the queue the worker
     # reads, or the crawl stops after the seed.
@@ -103,8 +103,8 @@ async def main() -> None:
     dedupe = InMemoryRequestIdDeduplicator()
     # The only source of request headers, applied in order; an auth middleware
     # belongs here too (README's Extensions section).
-    request_middlewares: tuple[RequestMiddleware,...] = (
-        HeadersMiddleware({"User-Agent": USER_AGENT}))
+    request_middlewares: tuple[RequestMiddleware, ...] = (
+        HeadersMiddleware({"User-Agent": USER_AGENT}),)
     fetcher = AiohttpWebPageFetcher(
         RETRY_SETTINGS.timeout_seconds,
         logger,
@@ -137,5 +137,6 @@ async def main() -> None:
     orchestrator = Orchestrator(repository, poller, worker, seed_line, logger)
     await orchestrator.run()
 
-    if __name__ == "__main__":
-        asyncio.run(main)
+
+if __name__ == "__main__":
+    asyncio.run(main())

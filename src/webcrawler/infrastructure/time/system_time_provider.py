@@ -31,4 +31,4 @@ class SystemTimeProvider(TimeProviderFactory):
 
         Synchronous: reads the clock only, no I/O (goal.md:14).
         """
-        return datetime.now(timezone.utc())
+        return datetime.now(timezone.utc)

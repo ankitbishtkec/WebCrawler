@@ -41,4 +41,4 @@ class HeadersMiddleware(RequestMiddleware):
         do not vary per request.
         headers: The headers collected so far, updated in place.
         """
-        headers.update(self._headers())
+        headers.update(self._headers)

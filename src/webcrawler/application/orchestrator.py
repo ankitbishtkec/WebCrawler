@@ -130,15 +130,15 @@ class Orchestrator:
                 self._logger.info(
                     "the seed %s could not be recorded or queued, so there "
                     "is nothing to crawl and the session ends: %s",
-                    seed.get_url,
+                    seed.get_url(),
                     error)
                 return
-                self._logger.info(
-                    "the crawl is running from the seed %s; interrupt it to stop",
-                    seed.get_url)
-                poller_task = asyncio.create_task(self._poller.run())
-                worker_task = asyncio.create_task(self._worker.run())
-                await asyncio.gather(poller_task, worker_task)
+            self._logger.info(
+                "the crawl is running from the seed %s; interrupt it to stop",
+                seed.get_url())
+            poller_task = asyncio.create_task(self._poller.run())
+            worker_task = asyncio.create_task(self._worker.run())
+            await asyncio.gather(poller_task, worker_task)
         finally:
             for task in (poller_task, worker_task):
                 if task is not None and not task.done:

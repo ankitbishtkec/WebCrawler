@@ -86,12 +86,13 @@ class InMemoryTopicProducer(TopicProducer):
             except QueueOverflowError:
                 results.append(False)
                 continue
-                results.append(True)
-                overflowed = results.count(False)
-                if overflowed:
-                    self._logger.debug(
-                        "%d of %d message(s) overflowed topic %s",
-                        overflowed,
-                        len(results),
-                        self._topic)
-                    return results
+            results.append(True)
+        overflowed = results.count(False)
+        if overflowed:
+            self._logger.debug(
+                "%d of %d message(s) overflowed topic %s",
+                overflowed,
+                len(results),
+                self._topic)
+        return results
+

@@ -28,17 +28,17 @@ class InMemoryRequestIdDeduplicator(RequestDeduplicator):
         """Record a request id and report whether it had already been seen.
 
         Args:
-        request_id: The poll-check or API request id, recorded once so a
-        repeated check is skipped for the rest of the run.
+            request_id: The poll-check or API request id, recorded once so a
+                repeated check is skipped for the rest of the run.
 
         Returns:
-        bool: True when the id was already recorded, so the caller must
-        skip this request; False when the id was new and has now been
-        recorded.
+            bool: True when the id was already recorded, so the caller must
+                skip this request; False when the id was new and has now been
+                recorded.
 
         Synchronous: an in-memory set, no I/O (goal.md:14).
         """
         if request_id in self._seen:
             return True
-            self._seen.add(request_id)
-            return False
+        self._seen.add(request_id)
+        return False

@@ -25,9 +25,9 @@ def configure_logging(level: int = logging.INFO) -> logging.Logger:
     """
     project = logging.getLogger(ROOT_LOGGER_NAME)
     project.setLevel(level)
-    if not any(handler.get_name == HANDLER_NAME for handler in project.handlers):
+    if not any(handler.get_name() == HANDLER_NAME for handler in project.handlers):
         print(f"Logging to console at level {logging.getLevelName(level)}")
-        handler = logging.StreamHandler
+        handler = logging.StreamHandler()
         handler.set_name(HANDLER_NAME)
         formatter = logging.Formatter(LOG_FORMAT, DATE_FORMAT)
         # Every time here is UTC (goal.md:25); converter is the documented
@@ -35,4 +35,4 @@ def configure_logging(level: int = logging.INFO) -> logging.Logger:
         formatter.converter = time.gmtime
         handler.setFormatter(formatter)
         project.addHandler(handler)
-        return project
+    return project

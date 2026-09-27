@@ -9,8 +9,10 @@ __pycache__/
 .ruff_cache/
 
 # Crawl output: the SQLite state store and any page bodies
-webcrawler.db
-webcrawler.db-journal
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 pages/
 crawl.log
 

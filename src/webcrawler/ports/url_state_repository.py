@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 
 from webcrawler.domain.custom_url import CustomURL
 
+
 class URLStateRepository(ABC):
     """Crawl state for every URL the crawler has seen, keyed by canonical form.
 
@@ -29,213 +30,202 @@ class URLStateRepository(ABC):
     never blocked by this store's own I/O.
     """
 
-@abstractmethod
-async def initialize(self) -> None:
-    """Create the table and both indexes when they are absent.
+    @abstractmethod
+    async def initialize(self) -> None:
+        """Create the table and both indexes when they are absent.
 
-    Idempotent, so it is safe on every start. Times are stored as UTC text
-    and every insert or update binds them as parameters rather than
-    relying on a SQLite clock, because `goal.md:27` requires
-    `next_crawl_time == created_time` on insert.
+        Idempotent, so it is safe on every start. Times are stored as UTC text
+        and every insert or update binds them as parameters rather than
+        relying on a SQLite clock, because `goal.md:27` requires
+        `next_crawl_time == created_time` on insert.
 
-    Raises:
-    sqlite3.Error: If the schema cannot be created or the connection
-    is already closed.
-    """
+        Raises:
+            sqlite3.Error: If the schema cannot be created or the connection
+                is already closed.
+        """
 
-@abstractmethod
-async def create_urls(self, urls: list[CustomURL]) -> None:
-    """Insert the given URLs, ignoring any that already exist.
+    @abstractmethod
+    async def create_urls(self, urls: list[CustomURL]) -> None:
+        """Insert the given URLs, ignoring any that already exist.
 
-    An insert is the only way a row gets `not_crawled` state, and it sets
-    `created_time` and `next_crawl_time` to the same instant, so a fresh
-    row is immediately eligible for a claim (goal.md:27).
+        An insert is the only way a row gets `not_crawled` state, and it sets
+        `created_time` and `next_crawl_time` to the same instant, so a fresh
+        row is immediately eligible for a claim (goal.md:27).
 
-    Args:
-    urls: The canonical URLs to make known to the crawler. An empty
-    list is a no-op.
+        Args:
+            urls: The canonical URLs to make known to the crawler. An empty
+                list is a no-op.
 
-    Raises:
-    sqlite3.Error: If the batch cannot be written.
-    """
+        Raises:
+            sqlite3.Error: If the batch cannot be written.
+        """
 
-@abstractmethod
-async def close(self) -> None:
-    """Close the connection and join the worker thread it owns.
+    @abstractmethod
+    async def close(self) -> None:
+        """Close the connection and join the worker thread it owns.
 
-    Idempotent, so the orchestrator can call it from its shutdown path
-    without knowing whether anything else already closed the store.
+        Idempotent, so the orchestrator can call it from its shutdown path
+        without knowing whether anything else already closed the store.
+        aiosqlite runs each connection on a non-daemon thread that blocks
+        until the connection closes, and interpreter shutdown joins non-daemon
+        threads before finalization. Without this, `Ctrl+C` and pytest session
+        teardown both hang.
 
-    aiosqlite runs each connection on a non-daemon thread that blocks
-    until the connection closes, and interpreter shutdown joins non-daemon
-    threads before finalization. Without this, `Ctrl+C` and pytest session
-    teardown both hang.
+        Raises:
+            sqlite3.Error: If closing the connection fails.
+        """
 
-    Raises:
-    sqlite3.Error: If closing the connection fails.
-    """
+    @abstractmethod
+    async def get_crawlable_urls(
+        self,
+        now: datetime,
+        max_items: int,
+        *,
+        job_timeout: timedelta,
+        queue_timeout: timedelta,
+    ) -> list[CustomURL]:
+        """Read the rows that a claim would currently select, changing nothing.
 
-@abstractmethod
-async def get_crawlable_urls(
-    self,
-    now: datetime,
-    max_items: int,
-    *,
-    job_timeout: timedelta,
-    queue_timeout: timedelta) -> list[CustomURL]:
-    """Read the rows that a claim would currently select, changing nothing.
+        Observability and tests only; the poller uses the claim methods, so
+        this is not the production handoff. A read that races a concurrent
+        claim can report a row a claim has already moved, which is why no
+        caller may treat the result as reserved work.
 
-    Observability and tests only; the poller uses the claim methods, so
-    this is not the production handoff. A read that races a concurrent
-    claim can report a row a claim has already moved, which is why no
-    caller may treat the result as reserved work.
+        It applies the same predicate and the same timeouts as
+        `claim_candidates`, so a `started_crawl` or `queued` row that is still
+        within its timeout is not reported as crawlable: the read must not
+        preview work somebody is already doing (goal.md:33-51).
 
-    It applies the same predicate and the same timeouts as
-    `claim_candidates`, so a `started_crawl` or `queued` row that is still
-    within its timeout is not reported as crawlable: the read must not
-    preview work somebody is already doing (goal.md:33-51).
+        Args:
+            now: The instant the eligibility predicates are evaluated against,
+                in UTC.
+            max_items: The row limit. `-1` means no limit, the `goal.md:59`
+                default.
+            job_timeout: How long a `started_crawl` row may stay untouched
+                before it is treated as abandoned and reclaimable.
+            queue_timeout: How long a `queued` row may wait before it is
+                reported as reclaimable.
 
-    Args:
-    now: The instant the eligibility predicates are evaluated against,
-    in UTC.
-    max_items: The row limit. `-1` means no limit, the `goal.md:59`
-    default.
-    job_timeout: How long a `started_crawl` row may stay untouched
-    before it is treated as abandoned and reclaimable.
-    queue_timeout: How long a `queued` row may wait before it is
-    reported as reclaimable.
+        Returns:
+            list[CustomURL]: Up to `max_items` eligible URLs ordered by
+                `next_crawl_time` ascending.
 
-    Returns:
-    list[CustomURL]: Up to `max_items` eligible URLs ordered by
-    `next_crawl_time` ascending.
+        Raises:
+            sqlite3.Error: If the query cannot be executed.
+        """
 
-    Raises:
-    sqlite3.Error: If the query cannot be executed.
-    """
+    @abstractmethod
+    async def claim_candidates(
+        self,
+        now: datetime,
+        max_items: int,
+        *,
+        job_timeout: timedelta,
+        queue_timeout: timedelta,
+    ) -> list[CustomURL]:
+        """Atomically move eligible rows to `queued` and return them.
 
-@abstractmethod
-async def claim_candidates(
-    self,
-    now: datetime,
-    max_items: int,
-    *,
-    job_timeout: timedelta,
-    queue_timeout: timedelta) -> list[CustomURL]:
-    """Atomically move eligible rows to `queued` and return them.
+        `BEGIN IMMEDIATE` then `UPDATE... RETURNING` in one transaction
+        (goal.md:67-98), so a row is handed to at most one caller even with
+        several claimers on the loop. No lock guards the transition: the
+        predicate only re-targets rows whose `queued` or `started_crawl`
+        status is older than its timeout, which is what prevents a double
+        claim (goal.md:109). A row whose DB write succeeded while
+        the queue send did not is recovered by the `queue_timeout` branch.
 
-    `BEGIN IMMEDIATE` then `UPDATE... RETURNING` in one transaction
-    (goal.md:67-98), so a row is handed to at most one caller even with
-    several claimers on the loop. No lock guards the transition: the
-    predicate only re-targets rows whose `queued` or `started_crawl`
-    status is older than its timeout, which is what prevents a double
-    claim (goal.md:109). A row whose DB write succeeded while
-    the queue send did not is recovered by the `queue_timeout` branch.
+        Args:
+            now: The instant the eligibility predicates are evaluated against,
+                in UTC.
+            max_items: The row limit. `-1` means no limit.
+            job_timeout: How long a `started_crawl` row may stay untouched
+                before it is treated as abandoned and reclaimable.
+            queue_timeout: How long a `queued` row may wait before it is
+                reported as reclaimable.
 
-    Args:
-    now: The instant the eligibility predicates are evaluated against,
-    in UTC.
-    max_items: The row limit. `-1` means no limit.
-    job_timeout: How long a `started_crawl` row may stay untouched
-    before it is treated as abandoned and reclaimed.
-    queue_timeout: How long a `queued` row may wait before it is
-    re-claimed, which is how a lost queue send is recovered.
+        Returns:
+            list[CustomURL]: The rows this call moved, ordered by
+                `next_crawl_time` ascending.
 
-    Returns:
-    list[CustomURL]: Only the rows this caller actually moved to
-    `queued`, so the caller never enqueues a row somebody else
-    already owns.
+        Raises:
+            sqlite3.Error: If the claim cannot be executed.
+        """
 
-    Raises:
-    sqlite3.Error: If the transaction cannot be committed, in which
-    case it is rolled back and no row is claimed.
-    """
+    @abstractmethod
+    async def claim_urls(
+        self,
+        urls: list[CustomURL],
+        now: datetime,
+        max_items: int = -1,
+        *,
+        job_timeout: timedelta,
+        queue_timeout: timedelta,
+    ) -> list[CustomURL]:
+        """Atomically move eligible rows among the given URLs to `queued`.
 
-@abstractmethod
-async def claim_urls(
-    self,
-    urls: list[CustomURL],
-    now: datetime,
-    max_items: int = -1,
-    *,
-    job_timeout: timedelta,
-    queue_timeout: timedelta) -> list[CustomURL]:
-    """As `claim_candidates`, restricted to the caller's own URLs.
+        The restriction to the caller's URLs is applied inside the claiming
+        subquery and before the limit, so `max_items` bounds the result rather
+        than the scan, and a URL that is not eligible returns nothing instead
+        of displacing another row (goal.md:92).
 
-    Backs API (a) of `goal.md:103`, where the operator names the URLs to
-    queue. The `custom_url IN (...)` restriction is applied inside the
-    claiming subquery, ahead of the `LIMIT`, so a batch is never
-    under-filled with rows the caller did not ask for. An empty `urls`
-    list issues no statement at all.
+        Args:
+            urls: The URLs the caller wants queued; an empty list issues no
+                statement at all.
+            now: The instant the eligibility predicates are evaluated against,
+                in UTC.
+            max_items: The row limit. `-1` means no limit.
+            job_timeout: How long a `started_crawl` row may stay untouched
+                before it is treated as abandoned and reclaimable.
+            queue_timeout: How long a `queued` row may wait before it is
+                reported as reclaimable.
 
-    `max_items` defaults to `-1` because the caller's list is already the
-    batch, so the limit is the caller's to impose or not.
+        Returns:
+            list[CustomURL]: The claimed rows among `urls`, ordered by
+                `next_crawl_time` ascending.
 
-    Args:
-    urls: The URLs the caller wants queued. They are expected to
-    already exist as rows, which is why this claims and never
-    inserts.
-    now: The instant the eligibility predicates are evaluated against,
-    in UTC.
-    max_items: The row limit. `-1` means no limit.
-    job_timeout: How long a `started_crawl` row may stay untouched
-    before it is treated as abandoned and reclaimed.
-    queue_timeout: How long a `queued` row may wait before it is
-    re-claimed.
+        Raises:
+            sqlite3.Error: If the claim cannot be executed.
+        """
 
-    Returns:
-    list[CustomURL]: The subset of `urls` that this caller moved to
-    `queued`, which is empty for a missing or freshly queued URL.
+    @abstractmethod
+    async def mark_started(self, url: CustomURL, now: datetime) -> None:
+        """Record that an attempt on url begins now.
 
-    Raises:
-    sqlite3.Error: If the transaction cannot be committed, in which
-    case it is rolled back and no row is claimed.
-    """
+        This writes the attempt time rather than the outcome, so the row stays
+        claimable while the attempt runs: a worker that dies before writing a
+        result leaves a `started_crawl` row that `job_timeout` reclaims
+        (goal.md:39-45).
 
-@abstractmethod
-async def mark_started(self, url: CustomURL, now: datetime) -> None:
-    """Record that a worker has begun crawling one URL.
+        Args:
+            url: The URL being crawled, which the store must already hold.
+            now: The attempt time, in UTC.
 
-    One transaction writes `state = started_crawl`, `last_crawl_time = now`
-    and `last_status_update_time = now`. That last column is what makes the
-    row reclaimable by the `job_timeout` branch if this worker dies before
-    writing a completion (goal.md:82-83), so it is the only writer of
-    `last_crawl_time`.
+        Raises:
+            sqlite3.Error: If the update cannot be executed.
+        """
 
-    Args:
-    url: The URL being crawled.
-    now: The attempt time, in UTC.
+    @abstractmethod
+    async def complete_crawl(
+        self,
+        finished: list[tuple[CustomURL, datetime | None]],
+        discovered: list[CustomURL],
+        now: datetime,
+    ) -> None:
+        """Record every finished row and insert the URLs they revealed.
 
-    Raises:
-    sqlite3.Error: If the update cannot be committed, in which case the
-    row is not marked and stays claimable.
-    """
+        All of it is one transaction, so a failure rolls the whole batch back
+        and a reader never sees a row finished while the URLs it discovered
+        are missing (goal.md:130-145).
 
-@abstractmethod
-async def complete_crawl(
-    self,
-    finished: list[tuple[CustomURL, datetime | None]],
-    discovered: list[CustomURL],
-    now: datetime) -> None:
-    """Write one batch of outcomes and one batch of discoveries atomically.
+        Args:
+            finished: Each crawled URL with the instant it becomes due again,
+                or None for no re-crawl. A `finished_crawl` row with no
+                `next_crawl_time` is never selected again (goal.md:76-91).
+            discovered: URLs found on the crawled pages, inserted when absent
+                with `next_crawl_time` equal to their `created_time`, so they
+                are immediately claimable (goal.md:27). An existing row is
+                left exactly as it is.
+            now: The completion time, in UTC.
 
-    A single bulk transaction (goal.md:145-148), so a batch either lands
-    whole or not at all, which is what lets the worker treat a failure
-    here as an abort rather than a partial success.
-
-    Args:
-    finished: One `(url, next_crawl_time)` pair per attempted URL.
-    A `None` time means no re-crawl is scheduled. The pair carries
-    per-row scheduling because one batch can mix success (None),
-    retry exhaustion (`now + reschedule_delay`), and a politeness
-    skip (`now + wait_ms`). Every row in the call also gets
-    `last_status_update_time = now`.
-    discovered: URLs found on the crawled pages, inserted when absent
-    with `created_time = next_crawl_time`. An existing row is left
-    untouched, so a re-crawl never resets another row's schedule.
-    now: The completion time, in UTC.
-
-    Raises:
-    sqlite3.Error: If the transaction cannot be committed, in which
-    case it is rolled back and no outcome is recorded, leaving the
-    rows `started_crawl` for the `job_timeout` branch to reclaim.
-    """
+        Raises:
+            sqlite3.Error: If the batch cannot be written.
+        """

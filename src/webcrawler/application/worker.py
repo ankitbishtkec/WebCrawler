@@ -158,144 +158,148 @@ class CrawlerWorker:
         """
         self._logger.info("worker reading the crawl queue")
         while True:
-            batch = await self._reader.peek(self._batch_size())
+            batch = await self._reader.peek(self._batch_size)
             if not batch:
                 # peek is CPU-only, so awaiting it does not yield; this sleep is
                 # the only yield on an empty queue, or the poller would starve.
-                await asyncio.sleep(self._idle_sleep_seconds())
+                await asyncio.sleep(self._idle_sleep_seconds)
                 continue
-                await self._process_batch(batch)
+            await self._process_batch(batch)
 
-                async def _process_batch(self, batch: list[BaseMessage]) -> None:
-                    """Crawl one batch concurrently, then record, queue, and commit it once.
+    async def _process_batch(self, batch: list[BaseMessage]) -> None:
+        """Crawl one batch concurrently, then record, queue, and commit it once.
 
-                    The batch's single instant is read before the task group opens, so the
-                    per-URL work and the completion write share one `now` and the clock is
-                    consulted once per batch rather than once per URL.
+        The batch's single instant is read before the task group opens, so the
+        per-URL work and the completion write share one `now` and the clock is
+        consulted once per batch rather than once per URL.
 
-                    The three calls after the task group are ordered and each happens once.
-                    `complete_crawl` must come first because the two following calls both
-                    depend on its rows existing: `enqueue_urls` claims the discovered rows
-                    and would claim nothing without the insert, and `commit` acknowledges
-                    messages whose work is only safely finished once the outcome is durable.
+        The three calls after the task group are ordered and each happens once.
+        `complete_crawl` must come first because the two following calls both
+        depend on its rows existing: `enqueue_urls` claims the discovered rows
+        and would claim nothing without the insert, and `commit` acknowledges
+        messages whose work is only safely finished once the outcome is durable.
 
-                    A `complete_crawl` failure is handled rather than propagated, because the
-                    DB write that would have recorded the outcome is the write that failed:
-                    there is nothing to record anywhere else. The batch is abandoned
-                    uncommitted, so its rows stay `started_crawl` and the `job_timeout`
-                    branch reclaims them once this worker moves on. The
-                    failure is per batch, so the loop continues with the next peeked batch
-                    rather than stopping the worker.
+        A `complete_crawl` failure is handled rather than propagated, because the
+        DB write that would have recorded the outcome is the write that failed:
+        there is nothing to record anywhere else. The batch is abandoned
+        uncommitted, so its rows stay `started_crawl` and the `job_timeout`
+        branch reclaims them once this worker moves on. The
+        failure is per batch, so the loop continues with the next peeked batch
+        rather than stopping the worker.
 
-                    Args:
-                    batch: The messages this iteration owns, which are the messages the
-                    final `commit` acknowledges.
+        Args:
+        batch: The messages this iteration owns, which are the messages the
+        final `commit` acknowledges.
 
-                    Raises:
-                    ExceptionGroup: Whatever the per-URL tasks raised, as one group, so
-                    a single unhandled failure aborts the whole batch. Nothing is
-                    recorded, queued, or committed in that case.
-                    Exception: Whatever `enqueue_urls` or `commit` raises, propagated
-                    after the outcomes were already written, so the batch is
-                    re-read and its outcomes recorded again idempotently.
-                    """
-                    now = self._time_provider.now
-                    async with asyncio.TaskGroup() as group:
-                        crawls = [
-                            group.create_task(self._crawl_one(item.url, now)) for item in batch
-                            ]
-                        # Reading the results here keeps both lists owned by this coroutine, so
-                        # the tasks never share mutable state and the batch's order is kept.
-                        outcomes: list[tuple[CustomURL, datetime | None]] = []
-                        discovered: list[CustomURL] = []
-                        for crawl in crawls:
-                            outcome, links = crawl.result
-                            outcomes.append(outcome)
-                            discovered.extend(links)
-                            try:
-                                await self._repository.complete_crawl(outcomes, discovered, now)
-                            except Exception as error:
-                                # The rows stay started_crawl for the job_timeout branch to
-                                # reclaim; committing would acknowledge unrecorded work.
-                                self._logger.error(
-                                    "recording the outcome of %d url(s) failed, so the batch is left "
-                                    "uncommitted and its rows stay started_crawl for the job_timeout "
-                                    "branch to reclaim: %s",
-                                    len(outcomes),
-                                    error)
-                                return
-                                # enqueue_urls claims the rows complete_crawl inserted, so it must
-                                # follow that transaction or the claim finds nothing to move.
-                                await self._queuer.enqueue_urls(discovered)
-                                await self._reader.commit(batch)
+        Raises:
+        ExceptionGroup: Whatever the per-URL tasks raised, as one group, so
+        a single unhandled failure aborts the whole batch. Nothing is
+        recorded, queued, or committed in that case.
+        Exception: Whatever `enqueue_urls` or `commit` raises, propagated
+        after the outcomes were already written, so the batch is
+        re-read and its outcomes recorded again idempotently.
+        """
+        now = self._time_provider.now()
+        async with asyncio.TaskGroup() as group:
+            crawls = [
+                group.create_task(self._crawl_one(item.url, now)) for item in batch
+            ]
+        # Reading the results here keeps both lists owned by this coroutine, so
+        # the tasks never share mutable state and the batch's order is kept.
+        outcomes: list[tuple[CustomURL, datetime | None]] = []
+        discovered: list[CustomURL] = []
+        for crawl in crawls:
+            outcome, links = crawl.result()
+            outcomes.append(outcome)
+            discovered.extend(links)
+        try:
+            await self._repository.complete_crawl(outcomes, discovered, now)
+        except Exception as error:
+            # The rows stay started_crawl for the job_timeout branch to reclaim;
+            # committing would acknowledge work that was never recorded.
+            self._logger.error(
+                "recording the outcome of %d url(s) failed, so the batch is left "
+                "uncommitted and its rows stay started_crawl for the job_timeout "
+                "branch to reclaim: %s",
+                len(outcomes),
+                error,
+            )
+            return
+        # enqueue_urls claims the rows complete_crawl inserted, so it must follow
+        # that transaction or the claim finds nothing to move.
+        await self._queuer.enqueue_urls(discovered)
+        await self._reader.commit(batch)
 
-                                async def _crawl_one(self, url: CustomURL, now: datetime) -> _CrawlResult:
-                                    """Crawl one URL and return its outcome beside the URLs it revealed.
+    async def _crawl_one(self, url: CustomURL, now: datetime) -> _CrawlResult:
+        """Crawl one URL and return its outcome beside the URLs it revealed.
 
-                                    The order is the plan's: mark started, ask the politeness policy, fetch,
-                                    store, extract, report. Marking first is what makes the row reclaimable
-                                    by the `job_timeout` branch if this worker dies before the outcome is
-                                    written (`goal.md:135-137`).
+        The order is the plan's: mark started, ask the politeness policy, fetch,
+        store, extract, report. Marking first is what makes the row reclaimable
+        by the `job_timeout` branch if this worker dies before the outcome is
+        written (`goal.md:135-137`).
 
-                                    The batch's single instant is passed in rather than read here, so every
-                                    schedule this task records is the instant the batch began at and a
-                                    batch of concurrent tasks can never disagree about when it ran.
+        The batch's single instant is passed in rather than read here, so every
+        schedule this task records is the instant the batch began at and a
+        batch of concurrent tasks can never disagree about when it ran.
 
-                                    The politeness decision is resolved here, per URL, because the policy
-                                    reports a wait rather than performing one: a wait at or below the
-                                    threshold is slept through and the crawl proceeds, while a longer wait
-                                    is recorded as the URL's own `next_crawl_time` and the URL is skipped. Skipping is what keeps a wait above the threshold from
-                                    stalling the whole batch and requeueing the same URL indefinitely.
+        The politeness decision is resolved here, per URL, because the policy
+        reports a wait rather than performing one: a wait at or below the
+        threshold is slept through and the crawl proceeds, while a longer wait
+        is recorded as the URL's own `next_crawl_time` and the URL is skipped. Skipping is what keeps a wait above the threshold from
+        stalling the whole batch and requeueing the same URL indefinitely.
 
-                                    Only a failed fetch is handled here. An extractor failure is left to
-                                    propagate, because an outcome recorded after a lost body would claim
-                                    a crawl that did not finish.
+        Only a failed fetch is handled here. An extractor failure is left to
+        propagate, because an outcome recorded after a lost body would claim
+        a crawl that did not finish.
 
-                                    Args:
-                                    url: The URL this task owns, taken from one message's payload.
-                                    now: The batch's single instant, shared by every mark, outcome, and
-                                    the completion write of this batch.
+        Args:
+        url: The URL this task owns, taken from one message's payload.
+        now: The batch's single instant, shared by every mark, outcome, and
+        the completion write of this batch.
 
-                                    Returns:
-                                    _CrawlResult: The `(url, next_crawl_time)` pair to record, where
-                                    None schedules no re-crawl, and the same-host URLs the body
-                                    revealed. A success yields the links, while a failed fetch and
-                                    a politeness skip yield none.
+        Returns:
+        _CrawlResult: The `(url, next_crawl_time)` pair to record, where
+        None schedules no re-crawl, and the same-host URLs the body
+        revealed. A success yields the links, while a failed fetch and
+        a politeness skip yield none.
 
-                                    Raises:
-                                    Exception: Whatever `mark_started`, `fetch`, `save`, or `extract`
-                                    raises other than a handled fetch failure; the enclosing task
-                                    group turns it into an abort of the whole batch.
-                                    """
-                                    await self._repository.mark_started(url, now)
-                                    wait_ms = self._politeness_policy.before_fetch
-                                    if wait_ms > self._sleep_threshold_ms:
-                                        return (
-                                            url,
-                                            now + timedelta(milliseconds=wait_ms)), []
-                                        if wait_ms > 0:
-                                            await asyncio.sleep(wait_ms / 1000)
-                                            try:
-                                                html = await self._fetcher.fetch(url, self._retry_policy)
-                                            except Exception as error:
-                                                self._logger.info(
-                                                    "fetching %s failed once its retries were spent, so it is due "
-                                                    "again in %s: %s",
-                                                    url.get_url,
-                                                    self._reschedule_delay,
-                                                    error)
-                                                return (url, now + self._reschedule_delay), []
-                                                links = self._link_extractor.extract(html, url)
-                                                self._logger.info(
-                                                    "visited %s, found %d link(s): %s",
-                                                    url.get_url,
-                                                    len(links),
-                                                    [link.get_url for link in links])
-                                                # Compared against None, not truthiness, so a configured zero still
-                                                # schedules a re-crawl.
-                                                next_crawl_time = (
-                                                    None
-                                                    if self._re_crawl_interval is None
-                                                    else now + self._re_crawl_interval
-                                                    )
-                                                return (url, next_crawl_time), links
+        Raises:
+        Exception: Whatever `mark_started`, `fetch`, `save`, or `extract`
+        raises other than a handled fetch failure; the enclosing task
+        group turns it into an abort of the whole batch.
+        """
+        await self._repository.mark_started(url, now)
+        wait_ms = self._politeness_policy.before_fetch()
+        if wait_ms > self._sleep_threshold_ms:
+            return (
+                url,
+                now + timedelta(milliseconds=wait_ms)), []
+        if wait_ms > 0:
+            await asyncio.sleep(wait_ms / 1000)
+        try:
+            html = await self._fetcher.fetch(url, self._retry_policy)
+        except Exception as error:
+            # A handled failure, not an abort: the row becomes due again in
+            # reschedule_delay and the batch still commits.
+            self._logger.info(
+                "fetching %s failed once its retries were spent, so it is due "
+                "again in %s: %s",
+                url.get_url(),
+                self._reschedule_delay,
+                error,
+            )
+            return (url, now + self._reschedule_delay), []
+        links = self._link_extractor.extract(html, url)
+        self._logger.info(
+            "visited %s, found %d link(s): %s",
+            url.get_url(),
+            len(links),
+            [link.get_url() for link in links])
+        # Compared against None, not truthiness, so a configured zero still
+        # schedules a re-crawl.
+        next_crawl_time = (
+            None
+            if self._re_crawl_interval is None
+            else now + self._re_crawl_interval
+            )
+        return (url, next_crawl_time), links

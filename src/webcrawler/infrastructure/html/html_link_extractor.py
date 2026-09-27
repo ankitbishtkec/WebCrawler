@@ -27,16 +27,16 @@ class HtmlLinkExtractor(LinkExtractor):
     worker's parsing step stays substitutable (`goal.md:8`).
 
     Args:
-    logger: The injected logger. The per-page summary is DEBUG; a rejected
-    href is DEBUG too, because a page full of `mailto:` links is
-    ordinary rather than an error.
+        logger: The injected logger. The per-page summary is DEBUG; a rejected
+            href is DEBUG too, because a page full of `mailto:` links is
+            ordinary rather than an error.
     """
 
     def __init__(self, logger: logging.Logger) -> None:
         """Hold the logger; nothing is parsed until `extract` is called.
 
         Args:
-        logger: The injected logger, the only one this class writes to.
+            logger: The injected logger, the only one this class writes to.
         """
         self._logger = logger
 
@@ -49,14 +49,14 @@ class HtmlLinkExtractor(LinkExtractor):
         fragment and therefore folds `#one` and `#two` of one page together.
 
         Args:
-        html: The page body to parse.
-        base_url: The URL the body was fetched from. It resolves the
-        relative hrefs and it names the one host in scope, which is why
-        a nested page resolves against itself and not against the seed.
+            html: The page body to parse.
+            base_url: The URL the body was fetched from. It resolves the
+                relative hrefs and it names the one host in scope, which is why
+                a nested page resolves against itself and not against the seed.
 
         Returns:
-        list[CustomURL]: The in-scope links in first-seen order, with
-        duplicates collapsed and every fragment already dropped.
+            list[CustomURL]: The in-scope links in first-seen order, with
+                duplicates collapsed and every fragment already dropped.
 
         Synchronous: pure CPU parsing, no I/O.
         """
@@ -69,37 +69,37 @@ class HtmlLinkExtractor(LinkExtractor):
             target = self._to_url(href, page_url)
             if target is None or target.hostname != base_url.hostname:
                 continue
-                unique.setdefault(target, None)
-                links = list(unique)
-                self._logger.debug(
-                    "extracted %d same-host link(s) from %d href(s) on %s",
-                    len(links),
-                    len(hrefs),
-                    page_url,
-                    )
-                return links
+            unique.setdefault(target, None)
+        links = list(unique)
+        self._logger.debug(
+            "extracted %d same-host link(s) from %d href(s) on %s",
+            len(links),
+            len(hrefs),
+            page_url,
+        )
+        return links
 
-                def _to_url(self, href: str, page_url: str) -> CustomURL | None:
-                    """Resolve one href against the page and parse the result.
+    def _to_url(self, href: str, page_url: str) -> CustomURL | None:
+        """Resolve one href against the page and parse the result.
 
-                    Returns None for anything that names no crawlable page, which is a blank
-                    href, a non-http scheme such as `mailto:`, or a malformed URL. Those are
-                    skipped rather than raised, because one bad link must not cost a page
-                    the rest of its links (`goal.md:142`).
+        Returns None for anything that names no crawlable page, which is a blank
+        href, a non-http scheme such as `mailto:`, or a malformed URL. Those are
+        skipped rather than raised, because one bad link must not cost a page
+        the rest of its links (`goal.md:142`).
 
-                    Args:
-                    href: The raw attribute value, as the markup carried it.
-                    page_url: The canonical URL of the page the href was read from.
+        Args:
+            href: The raw attribute value, as the markup carried it.
+            page_url: The canonical URL of the page the href was read from.
 
-                    Returns:
-                    CustomURL | None: The resolved link, or None when it is not a
-                    crawlable http(s) URL.
-                    """
-                    candidate = href.strip()
-                    if not candidate:
-                        return None
-                        try:
-                            return CustomURL(urljoin(page_url, candidate))
-                        except InvalidURLError as error:
-                            self._logger.debug("skipping %r on %s: %s", candidate, page_url, error)
-                            return None
+        Returns:
+            CustomURL | None: The resolved link, or None when it is not a
+                crawlable http(s) URL.
+        """
+        candidate = href.strip()
+        if not candidate:
+            return None
+        try:
+            return CustomURL(urljoin(page_url, candidate))
+        except InvalidURLError as error:
+            self._logger.debug("skipping %r on %s: %s", candidate, page_url, error)
+            return None

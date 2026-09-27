@@ -17,20 +17,20 @@ class RequestMiddleware(ABC):
 
     Middlewares are applied in sequence, so a later one can override a header
     an earlier one set; ordering is therefore part of the configuration. The
-    port stays sync on purpose — building an `Authorization` header or merging
+    port stays sync on purpose: building an `Authorization` header or merging
     configured headers is pure computation with no I/O, like the politeness
     policy.
     """
 
-@abstractmethod
-def apply(self, url: CustomURL, headers: dict[str, str]) -> None:
-    """Add or override headers for the request about to fetch url.
+    @abstractmethod
+    def apply(self, url: CustomURL, headers: dict[str, str]) -> None:
+        """Add or override headers for the request about to fetch url.
 
-    Synchronous: pure header computation, no I/O.
+        Args:
+            url: The URL about to be fetched, so a middleware can vary
+                headers per host or path.
+            headers: The headers collected so far, mutated in place so the
+                next middleware and then the fetcher see the additions.
 
-    Args:
-    url: The URL about to be fetched, so a middleware can vary
-    headers per host or path.
-    headers: The headers collected so far, mutated in place so the
-    next middleware and then the fetcher see the additions.
-    """
+        Synchronous: pure header computation, no I/O.
+        """

@@ -1,8 +1,4 @@
-"""Tests for CustomURL.
-
-Every test is parameterized over the raw URL and the expected canonical form, so
-a new scheme, host, path, or query case is a data row rather than a new test.
-"""
+"""Tests for CustomURL."""
 
 from typing import cast
 
@@ -13,28 +9,29 @@ from webcrawler.domain.custom_url import CustomURL, InvalidURLError
 @pytest.mark.parametrize(
     ("raw", "scheme", "hostname", "path", "query"),
     [
-    ("http://crawlme.monzo.com/", "http", "crawlme.monzo.com", "/"),
-    ("https://crawlme.monzo.com/", "https", "crawlme.monzo.com", "/"),
+    ("http://crawlme.monzo.com/", "http", "crawlme.monzo.com", "/", ()),
+    ("https://crawlme.monzo.com/", "https", "crawlme.monzo.com", "/", ()),
     (
     "https://community.monzo.com/a/b/c.html",
     "https",
     "community.monzo.com",
-    "/a/b/c.html",
+                "/a/b/c.html",
+            (),
     ),
-    ("http://h", "http", "h", ""),
-    ("http://h/", "http", "h", "/"),
-    ("HTTP://Example.COM/Path", "http", "example.com", "/Path"),
-    ("http://user:pw@h/x", "http", "h", "/x"),
+    ("http://h", "http", "h", "", ()),
+    ("http://h/", "http", "h", "/", ()),
+    ("HTTP://Example.COM/Path", "http", "example.com", "/Path", ()),
+    ("http://user:pw@h/x", "http", "h", "/x", ()),
     (
     "http://h:8080/x?b=2&a=1&b=3#frag",
     "http",
     "h",
     "/x",
     (("a", "1"), ("b", "2"), ("b", "3"))),
-    ("http://h/x?a=1", "http", "h", "/x", (("a", "1"))),
+    ("http://h/x?a=1", "http", "h", "/x", (("a", "1"),)),
     ("http://h/x?c&a=", "http", "h", "/x", (("a", ""), ("c", ""))),
-    ("http://h/x?a=hello+world", "http", "h", "/x", (("a", "hello world"))),
-    ("http://h/x?a=%C3%A9", "http", "h", "/x", (("a", "é"))),
+    ("http://h/x?a=hello+world", "http", "h", "/x", (("a", "hello world"),)),
+    ("http://h/x?a=%C3%A9", "http", "h", "/x", (("a", "é"),)),
     ])
 def test_constructor_exposes_canonical_components(
     raw: str,
@@ -42,15 +39,7 @@ def test_constructor_exposes_canonical_components(
     hostname: str,
     path: str,
     query: tuple[tuple[str, str],...]) -> None:
-    """Every component is reachable as a property after construction.
-
-    Args:
-    raw: The URL string handed to the constructor.
-    scheme: The expected scheme property.
-    hostname: The expected hostname property.
-    path: The expected path property.
-    query: The expected query property.
-    """
+    """Every component is reachable as a property after construction."""
     url = CustomURL(raw)
     assert url.scheme == scheme
     assert url.hostname == hostname
@@ -73,13 +62,8 @@ def test_constructor_exposes_canonical_components(
     ("http://h/x?", "http://h/x"),
     ])
 def test_get_url_returns_canonical_form(raw: str, canonical: str) -> None:
-    """get_url rebuilds scheme, host, path, and sorted query, and nothing else.
-
-    Args:
-    raw: The URL string handed to the constructor.
-    canonical: The expected canonical URL text.
-    """
-    assert CustomURL(raw).get_url == canonical
+    """get_url rebuilds scheme, host, path, and sorted query, and nothing else."""
+    assert CustomURL(raw).get_url() == canonical
 
 @pytest.mark.parametrize(
     "canonical",
@@ -90,14 +74,10 @@ def test_get_url_returns_canonical_form(raw: str, canonical: str) -> None:
     "http://h/x?a=&c=",
     ])
 def test_canonical_form_is_idempotent(canonical: str) -> None:
-    """Parsing a canonical URL again produces the same canonical URL.
-
-    Args:
-    canonical: An already canonical URL text.
-    """
+    """Parsing a canonical URL again produces the same canonical URL."""
     url = CustomURL(canonical)
-    assert url.get_url == canonical
-    assert CustomURL(url.get_url) == url
+    assert url.get_url() == canonical
+    assert CustomURL(url.get_url()) == url
 
 @pytest.mark.parametrize(
     "raw",
@@ -120,11 +100,7 @@ def test_canonical_form_is_idempotent(canonical: str) -> None:
     "http://h:notaport/x",
     ])
 def test_invalid_string_raises_invalid_url_error(raw: str) -> None:
-    """A string that is not a crawlable absolute http(s) URL is rejected.
-
-    Args:
-    raw: The rejected URL string.
-    """
+    """A string that is not a crawlable absolute http(s) URL is rejected."""
     with pytest.raises(InvalidURLError):
         CustomURL(raw)
 
@@ -132,22 +108,14 @@ def test_invalid_string_raises_invalid_url_error(raw: str) -> None:
             "raw", [123, None, 3.5, b"http://host/x", ["http://host/x"]]
             )
         def test_non_string_input_raises_invalid_url_error(raw: object) -> None:
-            """Untrusted console input is rejected, never coerced to text.
-
-            Args:
-            raw: A value that is not a string.
-            """
+            """Untrusted console input is rejected, never coerced to text."""
             with pytest.raises(InvalidURLError):
                 CustomURL(cast(str, raw))
 
                 @pytest.mark.parametrize("error", [InvalidURLError])
                 def test_invalid_url_error_bases_only_on_value_error(
                     error: type[InvalidURLError]) -> None:
-                    """The single project base is ValueError, so callers may catch either.
-
-                    Args:
-                    error: The exception class under test.
-                    """
+                    """The single project base is ValueError, so callers may catch either."""
                     assert issubclass(error, ValueError)
                     assert error.__bases__ == (ValueError)
 
@@ -165,12 +133,7 @@ def test_invalid_string_raises_invalid_url_error(raw: str) -> None:
                 def test_equal_query_keys_keep_duplicates_after_sorting(
                     raw: str, query: tuple[tuple[str, str],...]
                     ) -> None:
-                    """Sorting reorders by key only, so a repeated key keeps its input order.
-
-                    Args:
-                    raw: The URL string handed to the constructor.
-                    query: The expected query property.
-                    """
+                    """Sorting reorders by key only, so a repeated key keeps its input order."""
                     assert CustomURL(raw).query == query
 
                 @pytest.mark.parametrize(
@@ -182,13 +145,8 @@ def test_invalid_string_raises_invalid_url_error(raw: str) -> None:
                     ("https://h/x#one#two", "https://h/x"),
                     ])
                 def test_fragment_is_dropped(raw: str, canonical: str) -> None:
-                    """A fragment never reaches the canonical form.
-
-                    Args:
-                    raw: A URL carrying a fragment.
-                    canonical: The expected canonical URL text.
-                    """
-                    assert CustomURL(raw).get_url == canonical
+                    """A fragment never reaches the canonical form."""
+                    assert CustomURL(raw).get_url() == canonical
 
                 @pytest.mark.parametrize(
                     ("raw", "canonical"),
@@ -199,16 +157,8 @@ def test_invalid_string_raises_invalid_url_error(raw: str) -> None:
                     ("https://h:8443/x", "https://h:8443/x"),
                     ])
                 def test_a_port_is_defaulted_or_preserved(raw: str, canonical: str) -> None:
-                    """A scheme-default port collapses; any other port is kept.
-
-                    A non-default port selects a different server, so dropping it would
-                    crawl the wrong one (plan.md's CustomURL block).
-
-                    Args:
-                    raw: A URL carrying an explicit port.
-                    canonical: The expected canonical URL text.
-                    """
-                    assert CustomURL(raw).get_url == canonical
+                    """A scheme-default port collapses; any other port is kept."""
+                    assert CustomURL(raw).get_url() == canonical
 
                 @pytest.mark.parametrize(
                     ("raw", "port"),
@@ -220,12 +170,7 @@ def test_invalid_string_raises_invalid_url_error(raw: str) -> None:
                     ("https://h:8443/x", 8443),
                     ])
                 def test_the_port_property_reports_the_kept_port(raw: str, port: int | None) -> None:
-                    """The port property exposes the non-default port or None.
-
-                    Args:
-                    raw: A URL carrying an explicit port.
-                    port: The expected port value after defaulting.
-                    """
+                    """The port property exposes the non-default port or None."""
                     assert CustomURL(raw).port == port
 
                 @pytest.mark.parametrize(
@@ -236,14 +181,9 @@ def test_invalid_string_raises_invalid_url_error(raw: str) -> None:
                     ("https://h:443/x", "https://h/x"),
                     ])
                 def test_the_default_port_is_one_identity(left: str, right: str) -> None:
-                    """A scheme-default port and no port are one URL.
-
-                    Args:
-                    left: The first URL string.
-                    right: The second URL string.
-                    """
+                    """A scheme-default port and no port are one URL."""
                     first, second = CustomURL(left), CustomURL(right)
-                    assert first.get_url == second.get_url
+                    assert first.get_url() == second.get_url()
                     assert first == second
                     assert hash(first) == hash(second)
 
@@ -255,14 +195,9 @@ def test_invalid_string_raises_invalid_url_error(raw: str) -> None:
                     ("http://h:8080/x", "http://h:8081/x"),
                     ])
                 def test_a_non_default_port_is_its_own_identity(left: str, right: str) -> None:
-                    """A non-default port selects a different server, so it never collapses.
-
-                    Args:
-                    left: The first URL string.
-                    right: The second URL string.
-                    """
+                    """A non-default port selects a different server, so it never collapses."""
                     first, second = CustomURL(left), CustomURL(right)
-                    assert first.get_url != second.get_url
+                    assert first.get_url() != second.get_url()
                     assert first != second
                     assert hash(first) != hash(second)
 
@@ -278,12 +213,7 @@ def test_invalid_string_raises_invalid_url_error(raw: str) -> None:
                     ("http://user@h/x", "http://h/x"),
                     ])
                 def test_canonically_equal_urls_compare_equal(left: str, right: str) -> None:
-                    """Equality is the canonical form, so a dropped part creates no second peer.
-
-                    Args:
-                    left: The first URL string.
-                    right: The second URL string.
-                    """
+                    """Equality is the canonical form, so a dropped part creates no second peer."""
                     assert CustomURL(left) == CustomURL(right)
                     assert not CustomURL(left) != CustomURL(right)
 
@@ -304,12 +234,7 @@ def test_invalid_string_raises_invalid_url_error(raw: str) -> None:
                     ("http://h/x", "http://h:8080/x"),
                     ])
                 def test_differing_urls_compare_unequal(left: str, right: str) -> None:
-                    """A difference in any canonical component breaks equality.
-
-                    Args:
-                    left: The first URL string.
-                    right: The second URL string.
-                    """
+                    """A difference in any canonical component breaks equality."""
                     assert CustomURL(left) != CustomURL(right)
                     assert not CustomURL(left) == CustomURL(right)
 
@@ -317,11 +242,7 @@ def test_invalid_string_raises_invalid_url_error(raw: str) -> None:
                     "other", ["http://h/x", "http://h/x#frag", 42, None, ("http", "h", "/x")]
                     )
                 def test_comparison_with_a_foreign_type(other: object) -> None:
-                    """A foreign type never matches, even when its text is the same URL.
-
-                    Args:
-                    other: A value that is not a CustomURL.
-                    """
+                    """A foreign type never matches, even when its text is the same URL."""
                     url = CustomURL("http://h/x")
                     assert url.__eq__(other) is NotImplemented
                     assert url != other
@@ -329,11 +250,7 @@ def test_invalid_string_raises_invalid_url_error(raw: str) -> None:
 
                 @pytest.mark.parametrize("raw", ["http://h/x", "https://h/x?a=1"])
                 def test_dunder_methods_return_values(raw: str) -> None:
-                    """__eq__ and __hash__ return real values, never an implicit None.
-
-                    Args:
-                    raw: A URL string.
-                    """
+                    """__eq__ and __hash__ return real values, never an implicit None."""
                     url = CustomURL(raw)
                     assert url.__eq__(CustomURL(raw)) is True
                     assert url.__eq__(CustomURL("http://other.example/y")) is False
@@ -348,12 +265,7 @@ def test_invalid_string_raises_invalid_url_error(raw: str) -> None:
                     ("https://H/x", "https://h/x#frag"),
                     ])
                 def test_equal_urls_hash_equal(left: str, right: str) -> None:
-                    """The hash is the hash of the canonical text, so peers hash alike.
-
-                    Args:
-                    left: The first URL string.
-                    right: The second URL string.
-                    """
+                    """The hash is the hash of the canonical text, so peers hash alike."""
                     url, peer = CustomURL(left), CustomURL(right)
                     assert url.__hash__ == hash(url.get_url())
                     assert hash(url) == hash(peer)
@@ -368,11 +280,7 @@ def test_invalid_string_raises_invalid_url_error(raw: str) -> None:
                     "https://h:443/x?a=1&b=2&b=3#f"),
                     ])
                 def test_canonical_peers_collapse_in_a_set(raws: tuple[str,...]) -> None:
-                    """One canonical form is one set entry, so the URL set really dedupes.
-
-                    Args:
-                    raws: URL strings that share one canonical form.
-                    """
+                    """One canonical form is one set entry, so the URL set really dedupes."""
                     urls = [CustomURL(raw) for raw in raws]
                     assert len({*urls}) == 1
                     assert {urls[0]}.issuperset(urls)
@@ -387,23 +295,14 @@ def test_invalid_string_raises_invalid_url_error(raw: str) -> None:
                     "http://monzo.com/"),
                     ])
                 def test_distinct_urls_stay_distinct_in_a_set(raws: tuple[str,...]) -> None:
-                    """Canonicalisation does not over-collapse genuinely different URLs.
-
-                    Args:
-                    raws: URL strings with pairwise different canonical forms.
-                    """
+                    """Canonicalisation does not over-collapse genuinely different URLs."""
                     assert len({CustomURL(raw) for raw in raws}) == len(raws)
 
                 @pytest.mark.parametrize(
                     "raw", ["http://h/x", "http://h/x?a=1", "https://crawlme.monzo.com/"]
                     )
                 def test_hash_is_a_usable_key_and_partition_input(raw: str) -> None:
-                    """hash(url) is repeatable and indexes a dict, as the poller needs
-                    (goal.md:113).
-
-                    Args:
-                    raw: A URL string.
-                    """
+                    """hash(url) is repeatable and indexes a dict, as the poller needs."""
                     url = CustomURL(raw)
                     assert hash(url) == hash(url) == hash(CustomURL(raw))
                     assert {url: "page"}[CustomURL(raw)] == "page"

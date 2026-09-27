@@ -21,10 +21,9 @@ server responses.
 """
 
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import AbstractAsyncContextManager as AsyncContextManager
 from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator, Callable, Sequence
 
 import aiohttp
 
@@ -34,9 +33,17 @@ from webcrawler.ports.request_middleware import RequestMiddleware
 from webcrawler.ports.retry_policy import RetryPolicy
 from webcrawler.ports.web_page_fetcher import WebPageFetcher
 
+# A browser User-Agent: several sites answer 503 to a non-browser agent
+# (leetcode among them), so the crawler identifies like a normal client.
+DEFAULT_USER_AGENT: str = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
 BODY_ENCODING: str = "utf-8"
 FIRST_SUCCESS_STATUS: int = 200
 FIRST_FAILURE_STATUS: int = 300
+
 
 class AiohttpWebPageFetcher(WebPageFetcher):
     """Fetches one page per call through the native-async `aiohttp` client.
@@ -104,79 +111,84 @@ class AiohttpWebPageFetcher(WebPageFetcher):
             ) as session:
             yield session
 
-            async def fetch(self, url: CustomURL, retry_policy: RetryPolicy) -> str:
-                """Return one page's body, retried by the policy this call is given.
+    async def fetch(self, url: CustomURL, retry_policy: RetryPolicy) -> str:
+        """Return one page's body, retried by the policy this call is given.
 
-                The policy is asked for its timeout, backoff, and jitter and is handed a
-                single attempt as a callable, so it can bound that attempt and start a
-                fresh one; this class therefore cannot retry on its own and cannot
-                swallow a failure (`goal.md:141`).
+        The policy is asked for its timeout, backoff, and jitter and is handed a
+        single attempt as a callable, so it can bound that attempt and start a
+        fresh one; this class therefore cannot retry on its own and cannot
+        swallow a failure (`goal.md:141`).
 
-                Args:
-                url: The page to retrieve, already canonical.
-                retry_policy: The per-call timeout, backoff, and jitter. The same
-                instance may be shared with the store and the worker, so every
-                I/O in the process retries with the same settings.
+        Args:
+        url: The page to retrieve, already canonical.
+        retry_policy: The per-call timeout, backoff, and jitter. The same
+        instance may be shared with the store and the worker, so every
+        I/O in the process retries with the same settings.
+
+        Returns:
+        str: The decoded body of a 2xx response.
+
+        Raises:
+        aiohttp.ClientResponseError: If a response arrived with a non-2xx
+        status, once the policy has spent its attempts.
+        aiohttp.ClientError: For a transport failure raised by the client,
+        once the policy has spent its attempts.
+        OSError: For a DNS, socket, or timeout failure raised below the
+        client, once the policy has spent its attempts.
+        """
+        target = url.get_url()
+        # One session per call keeps this stateless, so it needs no close; a
+        # production crawler would reuse a long-lived one and own its lifecycle.
+        async with self._session_factory() as session:
+
+            async def attempt() -> str:
+                """Run one fetch, recording it whether it succeeds or not.
+
+                The record is emitted before the request is started, so an
+                attempt the policy abandons on its deadline is still visible in
+                the log (`goal.md:141`).
 
                 Returns:
                 str: The decoded body of a 2xx response.
 
                 Raises:
-                aiohttp.ClientResponseError: If a response arrived with a non-2xx
-                status, once the policy has spent its attempts.
-                aiohttp.ClientError: For a transport failure raised by the client,
-                once the policy has spent its attempts.
-                OSError: For a DNS, socket, or timeout failure raised below the
-                client, once the policy has spent its attempts.
+                NonRetryableError: For a non-2xx status. The site has
+                answered, so the policy must not spend a backoff on
+                it — a 503 from a site that refuses this client
+                included.
+                aiohttp.ClientError: For a transport failure, which is
+                transient and so is retried.
+                OSError: For a failure raised below the client.
                 """
-                target = url.get_url
-                # One session per call keeps this stateless, so it needs no close; a
-                # production crawler would reuse a long-lived one and own its lifecycle.
-                async with self._session_factory() as session:
+                self._logger.info("fetch attempt for %s", target)
+                # The built-in agent goes first so an unauthenticated crawl is
+                # still identified; a middleware may override it.
+                headers: dict[str, str] = {"User-Agent": DEFAULT_USER_AGENT}
+                for middleware in self._middlewares:
+                    middleware.apply(url, headers)
+                try:
+                    async with session.get(target, headers=headers) as response:
+                        status = response.status
+                        if not FIRST_SUCCESS_STATUS <= status < FIRST_FAILURE_STATUS:
+                            raise NonRetryableError(
+                                url.get_url(),
+                                f"the site answered with status {status}",
+                            )
+                        body = await response.text(
+                            encoding=BODY_ENCODING, errors="replace"
+                        )
+                except Exception as error:  # noqa: BLE001 - logged, then re-raised
+                    self._logger.info(
+                        "fetch of %s failed: %s: %s",
+                        target,
+                        type(error).__name__,
+                        error,
+                    )
+                    raise
+                self._logger.info("fetched %s: %d characters", target, len(body))
+                return body
 
-                    async def attempt() -> str:
-                        """Run one fetch, recording it whether it succeeds or not.
+            # Inside the session block: the policy runs every attempt against a
+            # session that is still open.
+            return await retry_policy.execute(attempt)
 
-                        The record is emitted before the request is started, so an
-                        attempt the policy abandons on its deadline is still visible in
-                        the log (`goal.md:141`).
-
-                        Returns:
-                        str: The decoded body of a 2xx response.
-
-                        Raises:
-                        NonRetryableError: For a non-2xx status. The site has
-                        answered, so the policy must not spend a backoff on
-                        it — a 503 from a site that refuses this client
-                        included.
-                        aiohttp.ClientError: For a transport failure, which is
-                        transient and so is retried.
-                        OSError: For a failure raised below the client.
-                        """
-                        self._logger.info("fetch attempt for %s", target)
-                        # The middlewares are the only source of headers, so a later one
-                        # overrides an earlier one and a caller with none sends none.
-                        headers: dict[str, str] = {}
-                        for middleware in self._middlewares:
-                            middleware.apply(url, headers)
-                            try:
-                                async with session.get(target, headers=headers) as response:
-                                    status = response.status
-                                    if not FIRST_SUCCESS_STATUS <= status < FIRST_FAILURE_STATUS:
-                                        raise NonRetryableError(
-                                            url.get_url, f"the site answered with status {status}"
-                                            )
-                                        body = await response.text(
-                                            encoding=BODY_ENCODING, errors="replace"
-                                            )
-                            except Exception as error: # noqa: BLE001 - logged, then re-raised
-                                self._logger.info(
-                                    "fetch of %s failed: %s: %s",
-                                    target,
-                                    type(error).__name__,
-                                    error)
-                                raise
-                                self._logger.info("fetched %s: %d characters", target, len(body))
-                                return body
-
-                                return await retry_policy.execute(attempt)

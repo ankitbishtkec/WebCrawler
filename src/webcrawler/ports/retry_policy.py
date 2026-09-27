@@ -13,40 +13,35 @@ from typing import TypeVar
 
 T = TypeVar("T")
 
+
 class RetryPolicy(ABC):
     """Runs one fallible operation with a deadline and exponential backoff.
 
     Whether a failure is worth retrying is the operation's call, not the
-    policy's: an operation that has been given a final answer — a 503 from a
-    site that refuses this client, a 404 — raises `NonRetryableError` and the
-    policy re-raises it on the first attempt without spending a backoff.
-    Everything else, a transport error or a timeout, is retried.
+    policy's: an operation that has been given a final answer, such as a 503
+    from a site that refuses this client, raises `NonRetryableError` and the
+    policy re-raises it on the first attempt rather than spending backoff on a
+    decision that will not change.
     """
 
-@abstractmethod
-async def execute(self, operation: Callable[[], Awaitable[T]]) -> T:
-    """Await the operation, retrying it according to the policy.
+    @abstractmethod
+    async def execute(self, operation: Callable[[], Awaitable[T]]) -> T:
+        """Run operation, retrying a transient failure with growing delays.
 
-    `operation` is a zero-argument callable rather than a coroutine so each
-    attempt is a fresh awaitable, and so the policy can bound one attempt
-    with a timeout while the operation itself knows nothing about retries.
+        Each attempt is bounded by the per-attempt deadline, so an operation
+        that hangs is abandoned rather than holding the attempt budget open
+        for ever.
 
-    Args:
-    operation: A callable returning a new awaitable per attempt. The
-    same callable is reused for every attempt, so it must be safe
-    to call more than once. It signals a final failure by raising
-    `NonRetryableError`.
+        Args:
+            operation: A callable returning a fresh awaitable per attempt, so
+                nothing is reused between attempts.
 
-    Returns:
-    T: The first successful result, returned without re-running the
-    operation.
+        Returns:
+            T: Whatever the successful attempt returned.
 
-    Raises:
-    NonRetryableError: Whatever the operation raised, re-raised on the
-    first attempt without retrying.
-    Exception: The last error, re-raised once the attempts are
-    exhausted, so the caller sees the real cause rather than a
-    wrapper. A timeout abandons only the await, which is why a
-    blocking implementation must bound itself with a socket
-    timeout.
-    """
+        Raises:
+            NonRetryableError: The first attempt's final answer, re-raised at
+                once with no backoff spent on it.
+            Exception: The last failure, once the attempt budget is spent.
+            asyncio.TimeoutError: If the final attempt exceeded the deadline.
+        """

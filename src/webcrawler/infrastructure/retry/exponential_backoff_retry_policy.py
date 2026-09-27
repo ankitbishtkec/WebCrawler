@@ -82,22 +82,22 @@ class ExponentialBackoffRetryPolicy(RetryPolicy):
         for attempt in range(self._settings.max_attempts):
             try:
                 return await asyncio.wait_for(
-                    operation, self._settings.timeout_seconds
-                    )
+                    operation(), self._settings.timeout_seconds
+                )
             except NonRetryableError:
                 # The operation was given a final answer (a 503, a 404), so
                 # a backoff would only delay the crawl: re-raise at once.
                 raise
-            except Exception as error: # noqa: BLE001 - re-raised below
+            except Exception as error:  # noqa: BLE001 - re-raised below
                 last_error = error
                 if attempt + 1 >= self._settings.max_attempts:
                     break
-                    await self._wait_before_retry(attempt)
-                    if last_error is not None:
-                        raise last_error
-                        raise ValueError(NO_ATTEMPTS_MESSAGE)
+                await self._wait_before_retry(attempt)
+        if last_error is not None:
+            raise last_error
+        raise ValueError(NO_ATTEMPTS_MESSAGE)
 
-                        async def _wait_before_retry(self, attempt: int) -> None:
+    async def _wait_before_retry(self, attempt: int) -> None:
                             """Sleep the backoff owed after the attempt that just failed.
 
                             The cap applies to the exponential term only, so the total wait is at

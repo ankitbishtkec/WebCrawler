@@ -1,10 +1,4 @@
-"""Tests for `HtmlLinkExtractor`.
-
-The extractor is pure, so every test drives it with real markup and asserts on
-the canonical URLs it returns: the href shapes of `goal.md:142`, the exact
-hostname scope of `goal.md:1`, the duplicate and fragment rules, and the
-documented contract that `extract` is synchronous.
-"""
+"""Tests for `HtmlLinkExtractor`."""
 
 import inspect
 import logging
@@ -23,45 +17,20 @@ UP = "https://crawlme.monzo.com/up.html"
 
 @pytest.fixture
 def logger() -> logging.Logger:
-    """Return the real logger the extractor is given, for caplog to capture.
-
-    Returns:
-    logging.Logger: The named logger, so a test can capture its records.
-    """
+    """Return the real logger the extractor is given, for caplog to capture."""
     return logging.getLogger(LOGGER_NAME)
 
 @pytest.fixture
 def extractor(logger: logging.Logger) -> HtmlLinkExtractor:
-    """Return the default extractor, wired the way the composition root wires it.
-
-    Args:
-    logger: The injected logger.
-
-    Returns:
-    HtmlLinkExtractor: An extractor over no particular page.
-    """
+    """Return the default extractor, wired the way the composition root wires it."""
     return HtmlLinkExtractor(logger)
 
 def anchors(*hrefs: str) -> str:
-    """Return a body whose only markup is one anchor per href.
-
-    Args:
-    hrefs: The `href` values, in the order they should be read.
-
-    Returns:
-    str: The markup.
-    """
+    """Return a body whose only markup is one anchor per href."""
     return "".join(f'<a href="{href}">link</a>' for href in hrefs)
 
 def links(*raw_urls: str) -> list[CustomURL]:
-    """Return the expected links, as the canonical URLs to compare against.
-
-    Args:
-    raw_urls: The expected canonical URLs, in the expected order.
-
-    Returns:
-    list[CustomURL]: The comparison value.
-    """
+    """Return the expected links, as the canonical URLs to compare against."""
     return [CustomURL(raw) for raw in raw_urls]
 
 @pytest.mark.parametrize(
@@ -91,13 +60,7 @@ def links(*raw_urls: str) -> list[CustomURL]:
 def test_an_href_resolves_against_the_page_it_was_read_from(
     extractor: HtmlLinkExtractor, href: str, expected: str
     ) -> None:
-    """Relative and absolute hrefs both become full URLs of the same host.
-
-    Args:
-    extractor: The extractor under test.
-    href: The href in the page, relative or absolute.
-    expected: The canonical URL it must resolve to.
-    """
+    """Relative and absolute hrefs both become full URLs of the same host."""
     assert extractor.extract(anchors(href), CustomURL(PAGE)) == links(expected)
 
 @pytest.mark.parametrize(
@@ -113,14 +76,7 @@ def test_an_href_resolves_against_the_page_it_was_read_from(
 def test_a_relative_href_resolves_against_the_page_not_the_seed(
     extractor: HtmlLinkExtractor, base: str, expected: str
     ) -> None:
-    """`goal.md:142` resolves against the page just fetched, so the same href on
-    a nested page and on the seed reaches different targets.
-
-    Args:
-    extractor: The extractor under test.
-    base: The URL the body was fetched from.
-    expected: The canonical URL the href must resolve to there.
-    """
+    """`goal.md:142` resolves against the page just fetched, so the same href on."""
     assert extractor.extract(anchors("sibling"), CustomURL(base)) == links(expected)
 
 @pytest.mark.parametrize(
@@ -147,14 +103,7 @@ def test_a_relative_href_resolves_against_the_page_not_the_seed(
 def test_duplicate_links_collapse_into_one_unique_set(
     extractor: HtmlLinkExtractor, hrefs: list[str], expected: list[str]
     ) -> None:
-    """`goal.md:142` asks for a full unique URL set, and the order it keeps is
-    the order the document listed the links in.
-
-    Args:
-    extractor: The extractor under test.
-    hrefs: The hrefs of the page, duplicates included.
-    expected: The expected links, in order.
-    """
+    """`goal.md:142` asks for a full unique URL set, and the order it keeps is."""
     assert extractor.extract(anchors(*hrefs), CustomURL(PAGE)) == links(*expected)
 
 @pytest.mark.parametrize(
@@ -174,15 +123,7 @@ def test_duplicate_links_collapse_into_one_unique_set(
 def test_a_cycle_keeps_both_ends(
     extractor: HtmlLinkExtractor, page: str, body: str, expected: list[str]
     ) -> None:
-    """Two pages that link to each other both report the other, and a self
-    reference is reported too: the crawler must not lose a real target.
-
-    Args:
-    extractor: The extractor under test.
-    page: The URL the body was fetched from.
-    body: The page's markup.
-    expected: The expected links, in order.
-    """
+    """Two pages that link to each other both report the other, and a self."""
     assert extractor.extract(body, CustomURL(page)) == links(*expected)
 
 @pytest.mark.parametrize(
@@ -201,17 +142,10 @@ def test_a_cycle_keeps_both_ends(
 def test_no_fragment_leaks_into_an_extracted_url(
     extractor: HtmlLinkExtractor, href: str, expected: str
     ) -> None:
-    """A fragment is client-side only, so it is absent from the canonical URL
-    and two fragments of one page are one link.
-
-    Args:
-    extractor: The extractor under test.
-    href: The href in the page.
-    expected: The canonical URL it must resolve to.
-    """
+    """A fragment is client-side only, so it is absent from the canonical URL."""
     extracted = extractor.extract(anchors(href), CustomURL(PAGE))
     assert extracted == links(expected)
-    assert all("#" not in url.get_url for url in extracted)
+    assert all("#" not in url.get_url() for url in extracted)
 
 @pytest.mark.parametrize(
     ("href", "expected"),
@@ -240,14 +174,7 @@ def test_no_fragment_leaks_into_an_extracted_url(
 def test_only_the_exact_page_hostname_survives(
     extractor: HtmlLinkExtractor, href: str, expected: list[str]
     ) -> None:
-    """`goal.md:1` scopes the crawl to the page's own hostname, so the three
-    hosts named there are dropped while a scheme change is not.
-
-    Args:
-    extractor: The extractor under test.
-    href: The href in the page.
-    expected: The links that must survive, in order.
-    """
+    """`goal.md:1` scopes the crawl to the page's own hostname, so the three."""
     assert extractor.extract(anchors(href), CustomURL(SEED)) == links(*expected)
 
 @pytest.mark.parametrize(
@@ -263,13 +190,7 @@ def test_only_the_exact_page_hostname_survives(
 def test_a_host_that_merely_ends_with_the_page_host_is_a_different_host(
     extractor: HtmlLinkExtractor, href: str
     ) -> None:
-    """A suffix or substring match would let `notcrawlme.monzo.com` and
-    `evilmonzo.com` into the crawl, so the comparison is equality (goal.md:1).
-
-    Args:
-    extractor: The extractor under test.
-    href: The near-miss host in the page.
-    """
+    """A suffix or substring match would let `notcrawlme.monzo.com` and."""
     assert extractor.extract(anchors(href), CustomURL(SEED)) == []
 
 @pytest.mark.parametrize(
@@ -300,14 +221,7 @@ def test_a_host_that_merely_ends_with_the_page_host_is_a_different_host(
 def test_only_anchor_hrefs_become_links(
     extractor: HtmlLinkExtractor, body: str, expected: list[str]
     ) -> None:
-    """A crawler follows pages, not stylesheets, images, or a rebasing rule, so
-    only an anchor's `href` is read (goal.md:142).
-
-    Args:
-    extractor: The extractor under test.
-    body: The page body.
-    expected: The links that must be extracted, in order.
-    """
+    """A crawler follows pages, not stylesheets, images, or a rebasing rule, so."""
     assert extractor.extract(body, CustomURL(PAGE)) == links(*expected)
 
 @pytest.mark.parametrize(
@@ -323,24 +237,16 @@ def test_the_summary_is_logged_through_the_injected_logger(
     extractor: HtmlLinkExtractor,
     body: str,
     expected_count: int) -> None:
-    """The per-page summary is DEBUG on the injected logger, and it reports how
-    many hrefs were read as well as how many links survived.
-
-    Args:
-    caplog: pytest's log capture.
-    extractor: The extractor under test.
-    body: The page body.
-    expected_count: How many links the summary must report.
-    """
+    """The per-page summary is DEBUG on the injected logger, and it reports how."""
     with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
         extractor.extract(body, CustomURL(PAGE))
         summaries = [
-            record for record in caplog.records if "same-host link" in record.getMessage
+            record for record in caplog.records if "same-host link" in record.getMessage()
             ]
         assert len(summaries) == 1
         assert summaries[0].levelno == logging.DEBUG
         assert summaries[0].name == LOGGER_NAME
-        assert f"{expected_count} same-host link(s)" in summaries[0].getMessage
+        assert f"{expected_count} same-host link(s)" in summaries[0].getMessage()
 
         @pytest.mark.parametrize(
             ("body", "fragment"),
@@ -355,18 +261,10 @@ def test_the_summary_is_logged_through_the_injected_logger(
             extractor: HtmlLinkExtractor,
             body: str,
             fragment: str) -> None:
-            """One bad link must not cost a page its other links, so the rejection is
-            recorded at DEBUG and the loop continues.
-
-            Args:
-            caplog: pytest's log capture.
-            extractor: The extractor under test.
-            body: The page body, holding one unusable href.
-            fragment: Text the rejection record must contain.
-            """
+            """One bad link must not cost a page its other links, so the rejection is."""
             with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
                 extractor.extract(body, CustomURL(PAGE))
-                assert any(fragment in record.getMessage for record in caplog.records)
+                assert any(fragment in record.getMessage() for record in caplog.records)
                 assert all(record.name == LOGGER_NAME for record in caplog.records)
 
                 @pytest.mark.parametrize(
@@ -376,13 +274,7 @@ def test_the_summary_is_logged_through_the_injected_logger(
                     pytest.param(HtmlLinkExtractor, "implementation", id="implementation"),
                     ])
                 def test_extract_is_declared_synchronous(owner: type, label: str) -> None:
-                    """Extraction is pure CPU work over a body already in memory, so the port and
-                    the implementation both stay synchronous and say so.
-
-                    Args:
-                    owner: The class whose `extract` is inspected.
-                    label: Which declaration is being checked, for the failure message.
-                    """
+                    """Extraction is pure CPU work over a body already in memory, so the port and."""
                     assert not inspect.iscoroutinefunction(owner.extract), label
                     assert not inspect.isasyncgenfunction(owner.extract), label
                     assert "Synchronous:" in (owner.extract.__doc__ or ""), label
