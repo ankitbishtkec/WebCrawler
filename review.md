@@ -233,20 +233,23 @@ an empty cache.
 > ankit: should we not use taskgroup instead of gather as exception in one task
 > should cancel others
 
-**Done.** The two tasks now run inside one `asyncio.TaskGroup`
-(`orchestrator.py:167-169`), so either ending — cancelled or failed — takes the
-other with it instead of leaving a dead task and a silently stopped crawl. A
-lone `ExceptionGroup` is unwrapped by `_unwrapped` (`orchestrator.py:41-53`,
-called at `orchestrator.py:170-176`) and the failure re-raised with
-`raise error from None`, so the original exception surfaces and the traceback
-shows the cause rather than the wrapper. `KeyboardInterrupt` and
-`CancelledError` are not in an `ExceptionGroup`, so they keep their own
-unwrapped path.
+**Done.** The two tasks are created inline — `group.create_task(
+self._poller.run())` and `group.create_task(self._worker.run())`, with no
+task variables — inside one `asyncio.TaskGroup`, so either ending, cancelled
+or failed, takes the other with it instead of leaving a dead task and a
+silently stopped crawl.
 
-A real bug was found and fixed alongside: the shutdown check read the bound
-method `task.done` instead of calling `task.done()`, so `task.cancel()` never
-ran and the `finally` relied on the loop tearing the tasks down. It is now
-`not task.done()` (`orchestrator.py:179`).
+The group's `ExceptionGroup` is neither unwrapped nor re-raised. The handler
+is `except Exception`: it logs the failure at `error` and swallows it. So a
+failed crawl task ends the session with an ERROR log and a normal return
+rather than propagating an exception out of `main()`.
+
+The earlier shutdown code went with it. `TaskGroup.__aexit__` awaits every
+child task before it returns — on normal completion, on a child failure, and
+on external cancellation — so the cancel loop could never fire and there was
+no task left to settle. The bug found alongside it, a shutdown check that
+read the bound method `task.done` instead of calling it, lived only in that
+deleted block.
 
 ### 20. `src/webcrawler/application/orchestrator.py:103`
 
@@ -264,13 +267,18 @@ else in the file moved.
 
 > ankit: use taskgroup here and at line 136 instead of .gather to do this cleanly
 
-**Done.** The shutdown is a second `asyncio.TaskGroup` around one `_settle`
-task per created task (`orchestrator.py:181-187`). `_settle`
-(`orchestrator.py:23-38`) waits with `asyncio.wait`, which never re-raises, and
-retrieves the exception, so a task re-delivering the error the outer `try` is
-already propagating cannot skip `repository.close()`. `asyncio.gather` is gone
-from the module. A shutdown run proved the store is still closed on cancel and
-on a sibling task's failure, with no task left behind.
+**Done, and the shutdown group was then deleted as dead code.**
+`asyncio.gather` is gone from the module. The shutdown is not a second
+`asyncio.TaskGroup`; the one group that runs the poller and the worker also
+covers shutdown, and the `finally` is a single statement,
+`await repository.close()`.
+
+The helper that waited on a task and retrieved its exception is gone too: the
+group already awaits every child task before it returns on all three exit
+paths, so a wait on a finished task returned immediately and the group had
+already retrieved the exception while unwinding. A shutdown run proved the
+store is still closed on cancel and on a sibling task's failure, with no task
+left behind.
 
 ### 22. `src/webcrawler/application/worker.py:146`
 
