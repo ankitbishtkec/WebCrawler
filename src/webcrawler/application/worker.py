@@ -107,9 +107,8 @@ class CrawlerWorker:
     async def run(self) -> None:
         """Read batches until cancelled, recording each one.
 
-        The peek is the one call outside a handler. `TopicReader.peek`
-        documents that a networked reader may raise, so the guard is warranted;
-        the shipped in-memory reader never does.
+        `peek` is unguarded: the shipped in-memory reader cannot fail, and a
+        guard for an extension nobody asked for is not added.
 
         Raises:
         asyncio.CancelledError: When cancelled, which is how the orchestrator
@@ -117,16 +116,7 @@ class CrawlerWorker:
         """
         self._logger.debug("worker reading the crawl queue")
         while True:
-            try:
-                batch = await self._reader.peek(self._batch_size)
-            #ankit: read agents.md and this should not exists the exception is never raised from peek.
-            except Exception as error:
-                self._logger.error(
-                    "reading the crawl queue failed, so this iteration is "
-                    "skipped and the next one tries again: %s",
-                    error,
-                )
-                batch = []
+            batch = await self._reader.peek(self._batch_size)
             if not batch:
                 # peek is CPU-only, so this sleep is the only yield on an empty
                 # queue; without it the poller would starve.

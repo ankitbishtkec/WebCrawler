@@ -80,10 +80,10 @@ class CustomURL:
         default_port = 443 if parts.scheme == "https" else 80
         self._port = port if port is not None and port != default_port else None
         self._path = parts.path
-        # sorted is stable, so equal keys keep their input order and a
-        # repeated key survives as two pairs.
-        #ankit: should first sort by key, if keys are equal then value is used for sorting. this is a bug here 
-        self._query = tuple(sorted(pairs, key=lambda pair: pair[0]))
+        # Sorted by key then value, so the same query written in a different
+        # order gives the same canonical form. Sorting the pair itself is that
+        # comparison, and a repeated key still survives as two pairs.
+        self._query = tuple(sorted(pairs))
 
     @property
     def scheme(self) -> str:

@@ -18,3 +18,4 @@ crawl.log
 
 # Build metadata from the editable install
 *.egg-info/
+v.log
