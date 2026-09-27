@@ -1,0 +1,18 @@
+# The virtual environment is recreated from pyproject.toml
+.venv/
+
+# Python bytecode and tooling caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Crawl output: the SQLite state store and any page bodies
+webcrawler.db
+webcrawler.db-journal
+pages/
+crawl.log
+
+# Build metadata from the editable install
+*.egg-info/

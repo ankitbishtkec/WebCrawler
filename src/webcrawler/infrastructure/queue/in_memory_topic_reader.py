@@ -1,0 +1,80 @@
+"""The read side of the in-memory topic: peek and commit.
+
+A thin view over the shared queue. It owns nothing, so what it peeks and
+commits is exactly what the producer over the same queue enqueued.
+"""
+
+import logging
+
+from webcrawler.domain.messages import BaseMessage
+from webcrawler.infrastructure.queue.in_memory_single_topic_single_partition_queue import (
+    InMemorySingleTopicSinglePartitionQueue)
+from webcrawler.ports.topic_reader import TopicReader
+
+class InMemoryTopicReader(TopicReader):
+    """Read the shared queue's single deque.
+
+    The constructor params match a real prod queue for future-proofing: the
+    topic and the `consumer_group_id` are recorded and never consulted, and no
+    reader id is kept — one deque, no connected-reader list (goal.md:118).
+
+    It extends the `TopicReader` ABC and is extended by nothing, which is
+    what keeps the read side substitutable (goal.md:8).
+
+    Args:
+    topic: The topic name from the port, recorded and never consulted.
+    consumer_group_id: The group this reader belongs to. A no-op for
+    this implementation, kept because the interface carries it
+    (goal.md:120).
+    queue: The shared queue. It must be the same instance the
+    producer writes to, or the reader reads an empty queue.
+    logger: The injected logger, which records the join at INFO.
+    """
+
+    def __init__(
+        self,
+        topic: str,
+        consumer_group_id: str,
+        queue: InMemorySingleTopicSinglePartitionQueue,
+        logger: logging.Logger) -> None:
+        """Hold the topic, group, queue, and logger.
+
+        Args:
+        topic: The topic to read, recorded and never consulted.
+        consumer_group_id: The group this reader belongs to; recorded and
+        never used.
+        queue: The shared queue, which must be the producer's queue.
+        logger: The injected logger.
+        """
+        self._topic = topic
+        self._consumer_group_id = consumer_group_id
+        self._queue = queue
+        self._logger = logger
+        self._logger.info(
+            "reading topic %s as group %s", topic, consumer_group_id
+            )
+
+    async def peek(self, n: int) -> list[BaseMessage]:
+        """Read the head of the queue without removing anything.
+
+        Args:
+        n: The largest number of items wanted.
+
+        Returns:
+        list[BaseMessage]: `min(n, available)` items, leaving the deque
+        unchanged.
+        """
+        return self._queue.peek(n)
+
+    async def commit(self, items: list[BaseMessage]) -> None:
+        """Remove `min(len(items), available)` items from the head.
+
+        Head-based and non-idempotent: committing the same batch twice
+        removes twice as many, which is safe only because the shipped run
+        path has exactly one reader.
+
+        Args:
+        items: The batch being acknowledged. Only its count is used, so
+        a batch larger than the deque cannot underflow it.
+        """
+        self._queue.commit(len(items))
