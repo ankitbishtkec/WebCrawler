@@ -57,7 +57,6 @@ RETRY_SETTINGS: RetrySettings = RetrySettings(
     max_delay_seconds=8.0,
     jitter_seconds=0.5,
     timeout_seconds=10.0)
-SLEEP_THRESHOLD_MS: int = 2_000 # the largest wait the worker sleeps through
 # Several sites answer 503 to a non-browser agent, so the crawler presents as
 # a normal browser.
 USER_AGENT: str = (
@@ -105,6 +104,7 @@ async def main() -> None:
     fetcher = AiohttpWebPageFetcher(
         RETRY_SETTINGS.timeout_seconds,
         logger,
+        retry_policy,
         middlewares=request_middlewares)
     link_extractor = HtmlLinkExtractor(logger)
     # No wait is ever requested, so a crawl is not throttled; a delaying policy
@@ -124,11 +124,9 @@ async def main() -> None:
         link_extractor,
         politeness_policy,
         poller,
-        retry_policy,
         producer=producer,
         batch_size=BATCH_SIZE,
         reschedule_delay=RESCHEDULE_DELAY,
-        sleep_threshold_ms=SLEEP_THRESHOLD_MS,
         time_provider=time_provider,
         logger=logger)
     orchestrator = Orchestrator(repository, poller, worker, seed_line, logger)

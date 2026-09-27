@@ -189,6 +189,8 @@ class URLPoller(CrawlQueuer):
             )
         # partition_key is hash(url), stored verbatim: a negative key already
         # routes non-negatively under the producer's modulo (goal.md:113).
+        # No retry policy here: the repository retries its own statements and
+        # the in-memory producer cannot fail, so there is nothing left to retry.
         results = await self._producer.enqueue_many(
             [BaseMessage(url, partition_key=hash(url)) for url in rows],
             request_id,

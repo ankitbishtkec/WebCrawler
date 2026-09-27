@@ -8,11 +8,19 @@
 - Keep them short and precise.
 - Do cover signaure of function with one line on each input param and output return.
 - **Never be too verbose.**
-- **After every code change, change the plan.md and the comments to reflect code correctly.**
+- **After every code change, change the comments to reflect code correctly.**
 
 ## Style
 
 - **Do not over-engineer code**
+
+## Ports
+
+- The port files (`src/webcrawler/ports/`) are designed for a prod system, so they are ground truth for what a networked extension may need: a networked queue, store, or fetcher is a legal implementation.
+- The shipped implementations are the ground truth for the dependencies we actually use today, so an in-memory queue that cannot fail must not be treated as if it can.
+- A port must document the failures a real implementation can raise in its `Raises:`, even when the shipped one never does.
+- A caller may guard a port call against a production failure, but the guard must be justified by the port's own contract, not by a guess.
+- Do not add a parameter, method, or guard for an extension nobody asked for.
 
 ## Verification
 

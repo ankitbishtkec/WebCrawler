@@ -71,16 +71,19 @@ class AiohttpWebPageFetcher(WebPageFetcher):
         self,
         timeout_seconds: float,
         logger: logging.Logger,
+        retry_policy: RetryPolicy,
         *,
         session_factory: Callable[[], AsyncContextManager[aiohttp.ClientSession]]
         | None = None,
         middlewares: Sequence[RequestMiddleware] =(),
         ) -> None:
-        """Hold the timeout, the logger, the session factory, and middlewares.
+        """Hold the timeout, the policy, the logger, the session, and middlewares.
 
         Args:
         timeout_seconds: The socket-side bound, in seconds.
         logger: The injected logger, the only one this class writes to.
+        retry_policy: Applied to every attempt here, so a caller's transport
+        errors are retried without the caller wrapping the call.
         session_factory: The session seam; the default builds a real
         `aiohttp.ClientSession` when this is None.
         middlewares: The header middlewares applied to every request, in
@@ -88,6 +91,7 @@ class AiohttpWebPageFetcher(WebPageFetcher):
         """
         self._timeout_seconds = timeout_seconds
         self._logger = logger
+        self._retry_policy = retry_policy
         self._middlewares = tuple(middlewares)
         self._session_factory: Callable[[], AsyncContextManager[aiohttp.ClientSession]] = (
             session_factory
@@ -111,19 +115,15 @@ class AiohttpWebPageFetcher(WebPageFetcher):
             ) as session:
             yield session
 
-    async def fetch(self, url: CustomURL, retry_policy: RetryPolicy) -> str:
-        """Return one page's body, retried by the policy this call is given.
+    async def fetch(self, url: CustomURL) -> str:
+        """Return one page's body, retried by the policy given at construction.
 
-        The policy is asked for its timeout, backoff, and jitter and is handed a
-        single attempt as a callable, so it can bound that attempt and start a
-        fresh one; this class therefore cannot retry on its own and cannot
-        swallow a failure (`goal.md:141`).
+        The policy is handed a single attempt as a callable, so it can bound
+        that attempt and start a fresh one; this class therefore cannot retry on
+        its own and cannot swallow a failure (`goal.md:141`).
 
         Args:
         url: The page to retrieve, already canonical.
-        retry_policy: The per-call timeout, backoff, and jitter. The same
-        instance may be shared with the store and the worker, so every
-        I/O in the process retries with the same settings.
 
         Returns:
         str: The decoded body of a 2xx response.
@@ -190,5 +190,5 @@ class AiohttpWebPageFetcher(WebPageFetcher):
 
             # Inside the session block: the policy runs every attempt against a
             # session that is still open.
-            return await retry_policy.execute(attempt)
+            return await self._retry_policy.execute(attempt)
 

@@ -15,9 +15,8 @@ from webcrawler.domain.custom_url import CustomURL
 class PolitenessPolicy(ABC):
     """Decides how long a worker must wait before its next request.
 
-    The policy returns a number and does not sleep: whether a wait is honoured
-    or turned into a re-schedule is the worker's decision, because the worker
-    alone knows its own sleep threshold (plan.md:97, plan.md:804).
+    The policy returns a number and never sleeps: the worker defers the URL to
+    that time, so one slow URL cannot stall its batch (plan.md:98).
     """
     @abstractmethod
     def before_fetch(self, url: CustomURL) -> int:

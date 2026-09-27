@@ -73,6 +73,11 @@ class TopicProducer(ABC):
             list[bool]: One result per input message, in the same order;
                 True where the message was enqueued, False where it
                 overflowed.
+
+        Raises:
+            Exception: A networked producer's send can fail, so an
+                implementation may raise. The shipped in-memory producer never
+                does; it reports overflow as `False` instead.
         """
 
     @abstractmethod
@@ -89,4 +94,9 @@ class TopicProducer(ABC):
         Returns:
             bool: True when the message was parked, False when the deadletter
                 queue is full and the message is dropped.
+
+        Raises:
+            Exception: A networked producer's send can fail, so an
+                implementation may raise. The shipped in-memory producer never
+                does; it reports a full deadletter queue as `False` instead.
         """

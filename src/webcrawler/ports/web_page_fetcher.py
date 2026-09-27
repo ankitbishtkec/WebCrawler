@@ -8,25 +8,20 @@ the caller instead of being hard-coded per implementation.
 from abc import ABC, abstractmethod
 
 from webcrawler.domain.custom_url import CustomURL
-from webcrawler.ports.retry_policy import RetryPolicy
 
 
 class WebPageFetcher(ABC):
     """Retrieves one page body for a URL, retrying under a given policy."""
 
     @abstractmethod
-    async def fetch(self, url: CustomURL, retry_policy: RetryPolicy) -> str:
+    async def fetch(self, url: CustomURL) -> str:
         """Return the response body for one URL.
 
-        The policy is passed per call rather than held by the fetcher, so one
-        policy instance can be shared with the store and the worker and every
-        I/O in the process then retries with the same settings (goal.md:17).
+        The implementation retries its own transport, so the caller neither
+        wraps the call in a policy nor passes one (`goal.md:141`).
 
         Args:
             url: The page to retrieve.
-            retry_policy: The timeout, backoff, and jitter to apply to every
-                attempt. The fetcher does not retry by itself; it hands its
-                single attempt to this policy.
 
         Returns:
             str: The decoded response body of a successful (2xx) response.

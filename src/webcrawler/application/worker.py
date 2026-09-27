@@ -1,19 +1,11 @@
 """The crawl worker: the consumer half of the crawl loop (goal.md).
 
-`goal.md` describes the worker as a queue reader that marks one URL as
-started, fetches it subject to a politeness policy, parses the body, and only
-then writes the outcome, queues the URLs it discovered, and commits the
-messages it consumed. Every collaborator is a port/ interface/ abstract class, 
-so this module names no concrete class: the same loop runs against SQLite and 
-HTTP in production and against in-memory doubles in the tests.
+Reads a batch, crawls each URL concurrently, then records the outcome, queues
+the discovered URLs, deadletters the failures, and commits the batch. Every
+collaborator is a port, so this module names no concrete class.
 
-
-`CrawlerWorker` has no project base class: it is a consumer loop composed from
-ports, and nothing is shared with it by inheritance ( goal.md).
-
-No exception escapes the loop. A per-URL failure is one failed URL, and a
-failed batch I/O call is one logged step, so neither a parse error nor a store
-outage can kill the worker and stop the crawl.
+No exception escapes the loop: a per-URL failure is one failed URL, and a failed
+batch I/O call is one logged step, so neither can kill the worker.
 """
 
 import asyncio
@@ -26,56 +18,42 @@ from webcrawler.domain.messages import BaseMessage
 from webcrawler.ports.crawl_queuer import CrawlQueuer
 from webcrawler.ports.link_extractor import LinkExtractor
 from webcrawler.ports.politeness_policy import PolitenessPolicy
-from webcrawler.ports.retry_policy import RetryPolicy
 from webcrawler.ports.time_provider import TimeProviderFactory
 from webcrawler.ports.topic_producer import TopicProducer
 from webcrawler.ports.topic_reader import TopicReader
 from webcrawler.ports.url_state_repository import URLStateRepository
 from webcrawler.ports.web_page_fetcher import WebPageFetcher
 
-# One URL's recorded outcome, a (url, next_crawl_time) pair, beside the URLs
-# its body revealed and whether the URL was crawled: a False third element is
-# what makes the caller deadletter the URL's message.
+# One URL's outcome pair, the links its body revealed, and whether it was
+# crawled; a False third element is what makes the caller deadletter it.
 _CrawlResult = tuple[tuple[CustomURL, datetime | None], list[CustomURL], bool]
+
 
 class CrawlerWorker:
     """Consumes the crawl queue one batch at a time, forever.
 
-    The loop is unbounded: `run` returns only when the task is cancelled,
-    because a crawl ends when the operator interrupts it, not when the queue
-    happens to be empty.
-
-    One instant is read per batch and every write in that batch shares it, so a
-    batch cannot record two instants that disagree and the clock is consulted
-    once however many URLs the batch holds.
+    `run` returns only on cancellation, since a crawl ends when the operator
+    interrupts it. One instant is read per batch and shared by every write, so a
+    batch cannot record two instants that disagree.
 
     Args:
     repository: The crawl state store, the only way a status is written.
     reader: The queue's read side, the only source of work.
-    fetcher: Retrieves one page body, applying the retry policy per call.
+    fetcher: Retrieves one page body under a supplied policy.
     link_extractor: Parses a body into the same-host URLs to crawl next.
-    politeness_policy: Reports how many milliseconds to wait before the next
-    call; it never sleeps, because only this worker knows its threshold.
-    queuer: Queues the discovered URLs immediately, once the rows they
-    belong to have been written.
-    producer: Parks a message whose URL could not be crawled, so the batch is
-    committed rather than retried for ever.
-    retry_policy: The one policy instance handed to every `fetch` call, so
-    the worker's attempts retry with the process-wide settings
-    (goal.md:17).
-    batch_size: How many messages one `peek` may return, and so the most
-    URLs a single task group can hold.
-    idle_sleep_seconds: How long to wait after a `peek` returned nothing.
-    reschedule_delay: How far ahead a URL whose fetch failed after its
-    retries is scheduled again.
-    sleep_threshold_ms: The largest politeness wait this worker sleeps
-    through. A longer one is deferred to the URL's own schedule, since
-    sleeping it would stall the batch and requeue that URL forever.
-    re_crawl_interval: The interval at which a successfully crawled URL
-    becomes due again, or None to schedule no re-crawl at all.
+    politeness_policy: Reports the wait before the next call, and records each
+    attempt's outcome.
+    queuer: Queues the discovered URLs once their rows are written.
+    producer: Parks a message whose URL could not be crawled.
+    batch_size: The most messages one `peek` returns, so the most URLs one
+    task group holds.
+    idle_sleep_seconds: The wait after a `peek` returned nothing.
+    reschedule_delay: How far ahead a URL that failed is scheduled again.
+    re_crawl_interval: When a crawled URL becomes due again, or None for
+    no re-crawl.
     time_provider: The only source of "now" for any write.
-    logger: The injected logger. A visited page and its found links are INFO,
-    because they are the crawl's own output (`goal.md:1`).
+    logger: The injected logger; a visited page and its links are INFO,
+    the crawl's own output (goal.md:1).
     """
 
     def __init__(
@@ -86,36 +64,29 @@ class CrawlerWorker:
         link_extractor: LinkExtractor,
         politeness_policy: PolitenessPolicy,
         queuer: CrawlQueuer,
-        retry_policy: RetryPolicy,
         *,
         producer: TopicProducer,
         batch_size: int,
         idle_sleep_seconds: float = 1.0,
         reschedule_delay: timedelta = timedelta(minutes=1),
-        sleep_threshold_ms: int = 2_000,
         re_crawl_interval: timedelta | None = None,
         time_provider: TimeProviderFactory,
-        logger: logging.Logger) -> None:
+        logger: logging.Logger,
+    ) -> None:
         """Hold the ports and the schedule this worker was configured with.
-
-        Nothing is validated and nothing is initialized here except for the assignment
 
         Args:
         repository: The crawl state store.
-        reader: The queue's read side, the only source of work.
-        fetcher: Retrieves one page body under a supplied policy.
+        reader: The queue's read side.
+        fetcher: Retrieves one page body.
         link_extractor: Parses a body into same-host links.
         politeness_policy: Reports the wait before the next call.
         queuer: Queues the discovered URLs.
-        retry_policy: The instance passed to every `fetch` call.
-        producer: Parks the messages of the URLs that could not be crawled.
-        batch_size: The largest number of messages one peek may return.
+        producer: Parks the messages of URLs that could not be crawled.
+        batch_size: The most messages one peek returns.
         idle_sleep_seconds: The wait after a peek returned nothing.
-        reschedule_delay: The delay applied after a failed fetch.
-        sleep_threshold_ms: The largest politeness wait that is slept
-        through; a longer one is deferred on the URL's schedule.
-        re_crawl_interval: The re-crawl interval for a success, or None for
-        no re-crawl.
+        reschedule_delay: The delay applied after a failed URL.
+        re_crawl_interval: The re-crawl interval, or None for no re-crawl.
         time_provider: The only source of "now".
         logger: The injected logger.
         """
@@ -125,35 +96,30 @@ class CrawlerWorker:
         self._link_extractor = link_extractor
         self._politeness_policy = politeness_policy
         self._queuer = queuer
-        self._retry_policy = retry_policy
         self._producer = producer
         self._batch_size = batch_size
         self._idle_sleep_seconds = idle_sleep_seconds
         self._reschedule_delay = reschedule_delay
-        self._sleep_threshold_ms = sleep_threshold_ms
         self._re_crawl_interval = re_crawl_interval
         self._time_provider = time_provider
         self._logger = logger
 
     async def run(self) -> None:
-        """Read batches until the task is cancelled, recording each one.
+        """Read batches until cancelled, recording each one.
 
-        The reader is wired by its constructor, so the loop starts peeking
-        straight away; there is no connect step and no partition assignment to
-        hold.
-
-        The peek is the one call this loop makes outside a handler, because a
-        failed read is nothing to do with the batch behind it: it is logged and
-        the next iteration tries again, so the loop never ends on its own.
+        The peek is the one call outside a handler. `TopicReader.peek`
+        documents that a networked reader may raise, so the guard is warranted;
+        the shipped in-memory reader never does.
 
         Raises:
-        asyncio.CancelledError: When the task is cancelled, which is how
-        the orchestrator stops the crawl.
+        asyncio.CancelledError: When cancelled, which is how the orchestrator
+        stops the crawl.
         """
         self._logger.debug("worker reading the crawl queue")
         while True:
             try:
                 batch = await self._reader.peek(self._batch_size)
+            #ankit: read agents.md and this should not exists the exception is never raised from peek.
             except Exception as error:
                 self._logger.error(
                     "reading the crawl queue failed, so this iteration is "
@@ -162,8 +128,8 @@ class CrawlerWorker:
                 )
                 batch = []
             if not batch:
-                # peek is CPU-only, so awaiting it does not yield; this sleep is
-                # the only yield on an empty queue, or the poller would starve.
+                # peek is CPU-only, so this sleep is the only yield on an empty
+                # queue; without it the poller would starve.
                 await asyncio.sleep(self._idle_sleep_seconds)
                 continue
             await self._process_batch(batch)
@@ -171,29 +137,13 @@ class CrawlerWorker:
     async def _process_batch(self, batch: list[BaseMessage]) -> None:
         """Crawl one batch concurrently, then record, queue, park, and commit it.
 
-        The batch's single instant is read before the task group opens, so the
-        per-URL work and the completion write share one `now` and the clock is
-        consulted once per batch rather than once per URL. The whole batch is
-        marked started in one call before the group opens, because the store
-        updates many rows in one statement.
+        One `now` is read before the task group opens and shared by every write,
+        and the whole batch is marked started in one call before it opens.
 
-        Every call after the group is ordered and each happens once.
-        `complete_crawl` must come first because the two following calls both
-        depend on its rows existing: `enqueue_urls` claims the discovered rows
-        and would claim nothing without the insert, and `commit` acknowledges
-        messages whose work is only safely finished once the outcome is durable.
-
-        A `complete_crawl` failure is handled rather than propagated, because the
-        DB write that would have recorded the outcome is the write that failed:
-        there is nothing to record anywhere else. The batch is abandoned
-        uncommitted, so its rows stay `started_crawl` and the `job_timeout`
-        branch reclaims them once this worker moves on. Every other failure is
-        handled per call, so the loop continues with the next peeked batch
-        rather than stopping the worker.
-
-        Args:
-        batch: The messages this iteration owns, which are the messages the
-        final `commit` acknowledges.
+        The calls after the group are ordered and each happens once.
+        `complete_crawl` must come first, because `enqueue_urls` claims the rows
+        it inserted and `commit` acknowledges work that is only finished once
+        the outcome is durable.
 
         Raises:
         Exception: Nothing is raised
@@ -204,8 +154,8 @@ class CrawlerWorker:
             crawls = [
                 group.create_task(self._crawl_one(item.url, now)) for item in batch
             ]
-        # Reading the results here keeps both lists owned by this coroutine, so
-        # the tasks never share mutable state and the batch's order is kept.
+        # Collected here so the tasks share no mutable state and batch order is
+        # kept.
         outcomes: list[tuple[CustomURL, datetime | None]] = []
         discovered: list[CustomURL] = []
         failed: list[BaseMessage] = []
@@ -218,47 +168,71 @@ class CrawlerWorker:
         try:
             await self._repository.complete_crawl(outcomes, discovered, now)
         except Exception as error:
-            # The rows stay started_crawl for the job_timeout branch to reclaim;
-            # committing would acknowledge work that was never recorded.
+            # The outcome was never recorded, so the rows stay started_crawl for
+            # job_timeout to reclaim. Committing the messages is what stops the
+            # queue handing this batch straight back, so every message in it is
+            # deadlettered as best effort: the URLs are not lost, job_timeout
+            # returns them, but the worker must not fetch them again now.
             self._logger.error(
-                "recording the outcome of %d url(s) failed, so the batch is left "
-                "uncommitted and its rows stay started_crawl for the job_timeout "
-                "branch to reclaim: %s",
+                "recording the outcome of %d url(s) failed, so the batch is "
+                "deadlettered and committed and its rows stay started_crawl for "
+                "the job_timeout branch to reclaim: %s",
                 len(outcomes),
                 error,
             )
-            return
-        # enqueue_urls claims the rows complete_crawl inserted, so it must follow
-        # that transaction or the claim finds nothing to move.
-        try:
-            await self._queuer.enqueue_urls(discovered)
-        except Exception as error:
-            # The discovered rows are durable, so the next poll claims them from
-            # the store; losing this feed costs no work.
-            self._logger.warning(
-                "queueing %d discovered url(s) failed, so the next poll claims "
-                "them from the store instead: %s",
-                len(discovered),
-                error,
-            )
-        await self._deadletter(failed)
-        try:
+            await self._deadletter(batch)
             await self._reader.commit(batch)
+            return
+        # The rows complete_crawl inserted are already durable, so the next poll
+        # claims the ones this feed misses. Losing it costs no work, which is
+        # why a final failure is only a warning.
+        await self._try_queue_call(
+            lambda: self._queuer.enqueue_urls(discovered),
+            "queueing %d discovered url(s) failed, so the next poll claims them "
+            "from the store instead",
+            len(discovered),
+            level=logging.WARNING,
+        )
+        # Best effort: parking is a fallback, so a failure to park is logged and
+        # the rest are still parked. No retry, since the shipped producer cannot
+        # fail and a networked one reports a full queue as False.
+        await self._deadletter(failed)
+        # No retry policy here: commit is head-based, so re-issuing it would
+        # remove more than the batch owns. The port documents that a networked
+        # reader may raise, so the failure is caught and logged.
+        await self._try_queue_call(
+            lambda: self._reader.commit(batch),
+            "committing %d message(s) failed, so they stay on the queue and are "
+            "crawled again",
+            len(batch),
+        )
+
+    async def _try_queue_call(
+        self, call, template: str, count: int, level: int = logging.ERROR
+    ) -> None:
+        """Run one queue call, then log any failure at the given level.
+
+        No retry policy: the implementation retries its own I/O internally, so
+        this only catches what survives that.
+
+        Args:
+        call: The coroutine function to run.
+        template: The failure message, with one %s for the error.
+        count: How many URLs the call covered, for the message.
+        level: The level to log a final failure at, ERROR by default.
+
+        Raises:
+        Exception: Nothing is raised
+        """
+        try:
+            await call()
         except Exception as error:
-            # The messages are still on the queue, so they are crawled again.
-            self._logger.error(
-                "committing %d message(s) failed, so they stay on the queue and "
-                "are crawled again: %s",
-                len(batch),
-                error,
-            )
+            self._logger.log(level, template + ": %s", count, error)
 
     async def _mark_started(self, batch: list[BaseMessage], now: datetime) -> None:
         """Mark the whole batch started in one store call, and keep going.
 
-        The write is the worker's own attempt time, not an outcome, so a row
-        stays claimable while the attempt runs. A failure therefore leaves the
-        rows claimable and the crawl still runs, which the `job_timeout` and
+        A failure leaves the rows claimable, which the `job_timeout` and
         `queue_timeout` branches then reconcile.
 
         Args:
@@ -269,8 +243,7 @@ class CrawlerWorker:
         Exception: Nothing is raised
         """
         try:
-            await self._repository.mark_started(
-                [item.url for item in batch], now)
+            await self._repository.mark_started([item.url for item in batch], now)
         except Exception as error:
             self._logger.error(
                 "marking %d url(s) started at %s failed, so their rows stay "
@@ -283,9 +256,8 @@ class CrawlerWorker:
     async def _deadletter(self, failed: list[BaseMessage]) -> None:
         """Park the batch's failed messages so no message is retried for ever.
 
-        One message per call, because that is the port's shape. A message that
-        cannot be parked is logged and the rest are still parked: the caller
-        commits the batch either way, so a failed crawl is never seen again.
+        One message per call, the port's shape. A message that cannot be parked
+        is logged and the rest are still parked; the caller commits either way.
 
         Args:
         failed: The messages whose URL did not crawl, possibly empty.
@@ -298,58 +270,52 @@ class CrawlerWorker:
                 parked = await self._producer.enqueue_to_deadletter(message)
             except Exception as error:
                 self._logger.error(
-                    "parking the failed message for %s failed, so it is "
-                    "dropped with its batch committed: %s",
+                    "parking the failed message for %s failed, so it is dropped "
+                    "with its batch committed: %s",
                     message.url.get_url(),
                     error,
                 )
                 continue
             if not parked:
                 self._logger.error(
-                    "the deadletter queue is full, so the failed message for "
-                    "%s is dropped with its batch committed",
+                    "the deadletter queue is full, so the failed message for %s "
+                    "is dropped with its batch committed",
                     message.url.get_url(),
                 )
 
     async def _crawl_one(self, url: CustomURL, now: datetime) -> _CrawlResult:
-        """Crawl one URL and return its outcome beside the URLs it revealed.
+        """Crawl one URL, returning its outcome beside the URLs it revealed.
 
-        Every step of one URL is inside the one handler, because the batch runs
-        in a task group and an exception would take the whole batch down with
-        it. A failure of any kind — a fetch, a parse, an extract, a store write,
-        a programming error — is one failed URL: it becomes due again in
-        `reschedule_delay` and its message is deadlettered by the caller.
+        Every step is inside the one handler, because the batch runs in a task
+        group and a raise would take the whole batch down. Any failure is one
+        failed URL: due again in `reschedule_delay`, and deadlettered by the
+        caller. A politeness wait is never slept, only deferred, so one slow URL
+        cannot stall the batch.
 
         Args:
-        url: The URL this task owns, taken from one message's payload.
-        now: The batch's single instant, shared by every mark, outcome, and
-        the completion write of this batch.
+        url: The URL this task owns, from one message's payload.
+        now: The batch's single instant, shared by every write of this batch.
 
         Returns:
-        _CrawlResult: The `(url, next_crawl_time)` pair to record, where
-        None schedules no re-crawl; the same-host URLs the body revealed;
-        and whether the URL was crawled. A success and a politeness skip yield
-        True, while a failed fetch and an unexpected failure yield no links and
-        False, which is what makes the caller deadletter the message.
+        _CrawlResult: The outcome to record, None scheduling no re-crawl; the
+        same-host links the body revealed; and whether the URL was crawled. A
+        deferral and a success yield True, a failure yields no links and False,
+        which is what makes the caller deadletter the message.
 
         Raises:
         Exception: Nothing is raised
         """
         try:
             wait_ms = self._politeness_policy.before_fetch(url)
-            if wait_ms > self._sleep_threshold_ms:
-                return (
-                    url,
-                    now + timedelta(milliseconds=wait_ms)), [], True
             if wait_ms > 0:
-                await asyncio.sleep(wait_ms / 1000)
+                return (url, now + timedelta(milliseconds=wait_ms)), [], True
             is_success = False
             try:
-                html = await self._fetcher.fetch(url, self._retry_policy)
+                html = await self._fetcher.fetch(url)
                 is_success = True
             except Exception as error:
-                # A handled failure, not an abort: the row becomes due again in
-                # reschedule_delay and the caller deadletters the message.
+                # A handled failure, not an abort: the row becomes due again and
+                # the caller deadletters the message.
                 self._logger.error(
                     "fetching %s failed once its retries were spent, so it is due "
                     "again in %s: %s",
@@ -358,10 +324,11 @@ class CrawlerWorker:
                     error,
                 )
             finally:
-                # One outcome per attempt, given back even when the attempt
-                # failed, so a learning policy can back off from it.
+                # One outcome per attempt, given back even when it failed, so a
+                # learning policy can back off from it.
                 self._politeness_policy.record_fetch(
-                    now, url, BaseResult(is_success=is_success))
+                    now, url, BaseResult(is_success=is_success)
+                )
             if not is_success:
                 return (url, now + self._reschedule_delay), [], False
             links = self._link_extractor.extract(html, url)
@@ -369,19 +336,20 @@ class CrawlerWorker:
                 "visited %s, found %d link(s): %s",
                 url.get_url(),
                 len(links),
-                [link.get_url() for link in links])
+                [link.get_url() for link in links],
+            )
             # Compared against None, not truthiness, so a configured zero still
             # schedules a re-crawl.
             next_crawl_time = (
                 None
                 if self._re_crawl_interval is None
                 else now + self._re_crawl_interval
-                )
+            )
             return (url, next_crawl_time), links, True
         except Exception as error:
             self._logger.error(
-                "crawling %s failed, so it is due again in %s and its message "
-                "is deadlettered: %s",
+                "crawling %s failed, so it is due again in %s and its message is "
+                "deadlettered: %s",
                 url.get_url(),
                 self._reschedule_delay,
                 error,

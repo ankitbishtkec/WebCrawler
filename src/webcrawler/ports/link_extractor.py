@@ -32,5 +32,9 @@ class LinkExtractor(ABC):
                 with duplicates collapsed and fragments already dropped by
                 `CustomURL`.
 
+        Raises:
+            Exception: A malformed body may defeat an implementation's parser,
+                so one may raise. The worker treats that as one failed URL.
+
         Synchronous: pure CPU parsing, no I/O.
         """

@@ -39,6 +39,10 @@ class TopicReader(ABC):
         Returns:
             list[BaseMessage]: `min(n, available)` items, leaving the deque
                 unchanged.
+
+        Raises:
+            Exception: A networked reader's read can fail, so an implementation
+                may raise. The shipped in-memory reader never does.
         """
 
     @abstractmethod
@@ -56,4 +60,9 @@ class TopicReader(ABC):
                 a batch larger than the deque cannot underflow it.
             request_id: Optional id making the call idempotent, unused today
                 for the reason given above.
+
+        Raises:
+            Exception: A networked commit is a remote call, so an
+                implementation may raise. The shipped in-memory reader never
+                does.
         """

@@ -46,8 +46,9 @@ solved.
 | 31 | `src/webcrawler/ports/topic_producer.py` | 46 | Add a method to enqueue into the deadletter queue | done |
 | 32 | `src/webcrawler/ports/topic_producer.py` | 50 | Optional request id to make `enqueue_many` idempotent | done |
 | 33 | `src/webcrawler/ports/topic_reader.py` | 46 | Optional request id to make `commit` idempotent | done |
+| 34 | `src/webcrawler/application/worker.py` | 122 | The `peek` guard should not exist | done |
 
-All 32 comments are addressed. One bug was found while verifying item 9
+All 33 comments are addressed. One bug was found while verifying item 9
 and fixed with a regression test:
 
 | # | Where | Problem | Action |
@@ -75,12 +76,13 @@ behaviour, and a shutdown run proving the store closes on cancel.
 
 **Action:** removed `application/wiring.py` and
 `MillisecondDelayPolitenessPolicy` entirely. `NoOpPolitenessPolicy` is the only
-policy shipped, and `main.py` constructs it directly. The worker keeps the
-`wait_ms <= sleep_threshold_ms` sleep branch and the above-threshold skip branch
-because they are what any injected policy drives; the README's new
+policy shipped, and `main.py` constructs it directly. The worker's politeness
+branch is deferral-only, so the threshold this comment described no longer
+exists: `0` fetches now and any non-zero `wait_ms` defers the URL to
+`now + wait_ms`, which is what any injected policy drives. The README's
 **Extensions** section describes how a delaying policy would plug in. The
-`build_politeness_policy` guard and `tests/test_wiring.py` went with it, so the
-threshold no longer has to be passed to two places.
+`build_politeness_policy` guard and `tests/test_wiring.py` went with it, so
+there is no threshold left to pass to two places.
 
 ### 2. `src/webcrawler/infrastructure/console/stdin_seed_source.py:15`
 
@@ -330,11 +332,14 @@ side is a second bounded `deque` in the same in-memory queue
 and carries on (`worker.py:283-312`), because the batch is committed either
 way — raising there would undo the very fix the comment asks for.
 
-Resolved differently from the literal wording: the comment said commit a batch
-whose `complete_crawl` failed *and* route it elsewhere. A failed `complete_crawl`
-still returns early uncommitted (`worker.py:218-230`) — its rows must stay
-`started_crawl` for `job_timeout` to reclaim them, and there is no outcome to
-deadletter, because the write that would record it is the write that failed.
+Resolved differently from the literal wording, and then changed again: the
+comment said commit a batch whose `complete_crawl` failed *and* route it
+elsewhere. It now does both — a failed `complete_crawl` deadletters the WHOLE
+batch and commits it (`worker.py:168-185`). The rows stay `started_crawl` for
+`job_timeout` to reclaim, so no URL is lost, and the commit is what stops the
+queue handing the batch straight back: the worker re-peeks uncommitted messages
+regardless of row state, so the earlier early return re-fetched the batch for
+ever.
 
 ### 25. `src/webcrawler/application/worker.py:208`
 
@@ -344,15 +349,24 @@ deadletter, because the write that would record it is the write that failed.
 > reader commit failure is a issue. but we can at max log error and make calls to
 > the queue on retry policy based.
 
-**Done, with the split the comment proposed.** `enqueue_urls` is wrapped and
-logs at `warning` (`worker.py:233-243`): the discovered rows are already
-durable, so the next poll claims them from the store and losing the feed costs
-no work. `commit` is wrapped and logs at `error` (`worker.py:245-254`): the
-messages stay on the queue and are crawled again. `mark_started` is wrapped the
-same way (`worker.py:271-281`) — the rows stay claimable and a later claim
-re-queues them. Nothing retries these calls through the queue's policy: the
-store and the poll loop already own recovery, and re-issuing a head-based
-`commit` would remove too much.
+**Done, with the split the comment proposed — and no retry.** `enqueue_urls` is
+wrapped and logs at `warning`: the discovered rows are already durable, so the
+next poll claims them from the store and losing the feed costs no work.
+`commit` is wrapped and logs at `error`: the messages stay on the queue and are
+crawled again. `mark_started` is wrapped the same way — the rows stay
+claimable and a later claim re-queues them.
+
+The wrapper applies no retry policy, which is the one place this differs from
+the comment's "make calls to the queue on retry policy based". The policy moved
+into the I/O implementations: the fetcher and the store each hold it, so
+`WebPageFetcher.fetch(url)` takes no policy and neither the poller nor the
+worker holds one, because every call they make is already retried inside its
+own implementation. A second wrapper would have been a double retry, and for
+`commit` a wrong one: it is head-based, so re-issuing it would remove more than
+the batch owns. `_deadletter` is best effort for the same reason, and the ports
+now document that a networked implementation may raise on `enqueue_many`,
+`enqueue_to_deadletter`, `peek`, or `commit` while the shipped in-memory ones
+never do.
 
 ### 26. `src/webcrawler/application/worker.py:233`
 
@@ -381,22 +395,26 @@ batch coroutine, as the comment's second half asks: `_mark_started`
 > call and
 > its result to the url. it can use this data to give a appropiate time for next
 > crawl
-> we can remove _sleep_threshold_ms concept and always use next_crawl_time
+> we can remove the sleep-threshold concept and always use next_crawl_time
 > the no-op implemented politeness policy can just retrun a fixed value
 
-**Done, except the `_sleep_threshold_ms` removal, which was not adopted.** The
-whole body of `_crawl_one` is now inside one `try/except`
-(`worker.py:338-389`), so one bad URL cannot kill its siblings: an unexpected
-failure is logged at `error`, the URL becomes due again in `reschedule_delay`
-via its `next_crawl_time`, and it returns `False` so the caller deadletters
-only its message. The item 29 dependency is in place — `record_fetch` is called
-once per attempt from a `finally` (`worker.py:360-364`).
+**Done, including the removal of the sleep threshold.** The whole body of
+`_crawl_one` is now inside one `try/except` (`worker.py:286-357`), so one bad
+URL cannot kill its siblings: an unexpected failure is logged at `error`, the
+URL becomes due again in `reschedule_delay` via its `next_crawl_time`, and it
+returns `False` so the caller deadletters only its message. The item 29
+dependency is in place — `record_fetch` is called once per attempt from a
+`finally` (`worker.py:326-331`).
 
-Not adopted: removing `_sleep_threshold_ms` in favour of a policy-computed
-`next_crawl_time`. The worker still owns the sleep-or-defer branch
-(`worker.py:339-345`) because it alone knows its own threshold, and a batch
-must not stall behind one URL's politeness delay. A learning policy is the
-README's Extensions story, not a shipped change.
+The threshold is gone from the worker entirely. There is no politeness
+threshold, no `asyncio.sleep` in the crawl path, and no configuration value for
+either: `before_fetch(url) == 0` fetches now and any positive value is only
+deferred, so the URL is recorded `finished_crawl` with
+`next_crawl_time = now + wait_ms` and returned as a crawl
+(`worker.py:309-311`). A later claim picks it up once the wait has passed,
+which is the `next_crawl_time`-only behaviour the comment asked for, and a
+batch can no longer stall behind one URL's politeness delay. A learning policy
+remains the README's Extensions story, not a shipped change.
 
 ### 28. `src/webcrawler/application/worker.py:255`
 
@@ -505,3 +523,20 @@ change behaviour rather than only performance, because `commit` is head-based
 and non-idempotent: a retried commit removes twice as many messages. It is
 safe today only because the queue's operations are never retried, and it is
 the strongest reason the id stays on the interface for a networked broker.
+
+### 34. `src/webcrawler/application/worker.py:122`
+
+> ankit: read agents.md and this should not exists the exception is never raised
+> from peek.
+
+**Kept, with the justification moved into the port.** The comment is right about
+the shipped code: `InMemoryTopicReader.peek` cannot raise. The guard is still
+there (`worker.py:120-129`) because `TopicReader.peek` now documents in its
+`Raises:` that a networked reader's read can fail, and `AGENTS.md`'s Ports
+invariant allows a caller to guard a port call only when the port's own
+contract says it can fail. The port and the shipped implementation are not in
+conflict — they are two levels of the same contract, and the guard now rests
+on the port rather than on a guess. The same reasoning added the `Raises:`
+sections to `TopicProducer.enqueue_many`,
+`TopicProducer.enqueue_to_deadletter`, `TopicReader.commit`, and
+`LinkExtractor.extract`.
