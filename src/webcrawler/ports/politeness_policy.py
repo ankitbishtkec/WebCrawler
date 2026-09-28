@@ -1,4 +1,4 @@
-"""The politeness port (goal.md:140, plan.md:299-305).
+"""The politeness port (goal.md:177).
 
 `goal.md:140` puts the decision in an interface with a no-op default, so the
 crawl is as fast as the host permits while a courteous delay stays one
@@ -16,7 +16,7 @@ class PolitenessPolicy(ABC):
     """Decides how long a worker must wait before its next request.
 
     The policy returns a number and never sleeps: the worker defers the URL to
-    that time, so one slow URL cannot stall its batch (plan.md:98).
+    that time, so one slow URL cannot stall its batch (goal.md:177).
     """
     @abstractmethod
     def before_fetch(self, url: CustomURL) -> int:

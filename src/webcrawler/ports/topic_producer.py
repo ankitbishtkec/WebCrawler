@@ -1,4 +1,4 @@
-"""The queue's write port (goal.md:115-128, plan.md:246-275).
+"""The queue's write port (goal.md:115-128).
 
 The poller produces into a topic and the worker consumes from it, and
 `goal.md:119` asks for an interface on each side of that boundary. This module
@@ -57,11 +57,11 @@ class TopicProducer(ABC):
         """Enqueue a batch, reporting one outcome per input message.
 
         No dedupe: the caller owns that, because only the caller knows
-        whether a repeated URL is a retry or new work (plan_0_reviewed.md:64).
+        whether a repeated URL is a retry or new work (goal.md:125-126).
         An overflowed message is reported as `False` and the rest of the
         batch is still enqueued, so one full queue cannot discard a poll's
         whole claim; the row stays `queued` in the database and the first
-        poll after `queue_timeout` re-claims it (plan.md:91).
+        poll after `queue_timeout` re-claims it (goal.md:140).
 
         Args:
             messages: The batch to enqueue, in the order given.

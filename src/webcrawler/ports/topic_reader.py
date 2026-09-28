@@ -1,4 +1,4 @@
-"""The queue's read port (goal.md:115-128, plan.md:277-305).
+"""The queue's read port (goal.md:115-128).
 
 The consumer half of the queue boundary; `ports/topic_producer.py` is the
 producer half. The port is deliberately a queue, not a set of partitions: the
@@ -31,7 +31,7 @@ class TopicReader(ABC):
         """Read the head of the queue without removing anything.
 
         Non-reserving, because the shipped run path has exactly one reader, so
-        there is nothing to hold a claim against (plan.md:92).
+        there is nothing to hold a claim against (goal.md:151).
 
         Args:
             n: The largest number of items wanted.

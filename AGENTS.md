@@ -32,3 +32,4 @@
 - also cntrl+c the python process sometimes and see the logs on console or file from the process. Use debug mode if needed.
 
 -  Kill process running webcrawler
+- Delete any db files or logs files used for verifcation. Keep the working directory clean.

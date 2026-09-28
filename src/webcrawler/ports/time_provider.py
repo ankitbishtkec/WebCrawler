@@ -1,4 +1,4 @@
-"""The clock port (plan.md:599-604).
+"""The clock port (goal.md:11-12).
 
 Every time in this project is injected rather than read at the point of use, so
 the timeout predicates of `goal.md:33-51` can be tested against exact epochs

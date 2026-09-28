@@ -3,7 +3,7 @@
 `InMemorySingleTopicSinglePartitionQueue` is the single object injected into
 BOTH `InMemoryTopicProducer` and `InMemoryTopicReader`: if the two hold
 different instances the poller fills a queue the worker never reads, so the
-composition root constructs exactly one and hands it to both (plan.md:817).
+composition root constructs exactly one and hands it to both (goal.md:136).
 
 Two deques and nothing else: the crawl topic and its deadletter topic, and no
 topics, no partitions, no connected-reader list, no reader id. The prod-queue
@@ -35,7 +35,7 @@ class InMemorySingleTopicSinglePartitionQueue:
 
     The two adapters are composed over one instance of this and never
     subclass it, so neither view can hold a message the other cannot see
-    (plan.md:798, goal.md:8).
+    (goal.md:136).
 
     Args:
         max_size: The crawl queue's capacity, checked on append rather than via
@@ -88,7 +88,7 @@ class InMemorySingleTopicSinglePartitionQueue:
         """Read the head without removing anything.
 
         Non-reserving, because the shipped run path has exactly one reader,
-        so there is nothing to hold a claim against (plan.md:92).
+        so there is nothing to hold a claim against (goal.md:151).
 
         Args:
             n: The largest number of items wanted.
@@ -106,7 +106,7 @@ class InMemorySingleTopicSinglePartitionQueue:
 
         Head-based and non-idempotent: a second call with the same count
         removes a second time. That is safe only because the shipped run
-        path has exactly one reader (plan.md:299).
+        path has exactly one reader (goal.md:140).
 
         Args:
             count: How many messages to remove, bounded by the messages that

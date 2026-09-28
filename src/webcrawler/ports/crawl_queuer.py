@@ -1,4 +1,4 @@
-"""The queuer port (goal.md:56, plan.md:237-245).
+"""The queuer port (goal.md:71, goal.md:125-126).
 
 `goal.md:56` asks for one module that polls the URL state store and feeds the
 queue, and `goal.md:106` asks for it behind an interface, which is

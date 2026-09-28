@@ -59,7 +59,7 @@ src/webcrawler/
     ports/                      # every interface (repository, queuer, topics, ...)
     infrastructure/             # db (sqlite), queue (in-memory), fetch (aiohttp),
                                 # html, console, retry, politeness, time
-    utils/                      # logger, html_parser, request-id deduplicator
+    utils/                      # logger, html_parser
 ```
 
 Dependency direction: `domain` <- `ports` <- `application` <- composition root;
@@ -97,12 +97,10 @@ mechanism covers a worker that dies mid-crawl via `job_timeout` on
 
 ## Threads
 
-Two threads exist at runtime, both bounded:
-
-- the `asyncio.to_thread` bridge for the single seed read (stdin) — each
-  read completes when a line or EOF arrives;
-- aiosqlite's per-connection worker thread — joined by
-  `URLStateRepository.close()` on every exit of `Orchestrator.run()`.
+One extra thread exists at runtime: aiosqlite's per-connection worker thread,
+joined by `URLStateRepository.close()` on every exit of
+`Orchestrator.run()`. The seed is read with a blocking `input()` on the main
+thread before any task starts.
 
 HTTP needs no bridge: `aiohttp` is natively async and each attempt is
 bounded by `aiohttp.ClientTimeout(total=RetrySettings.timeout_seconds)`.
@@ -144,9 +142,10 @@ place to add more. The fetcher adds no header of its own.
   failure is worth retrying is the operation's call: a non-2xx status — a
   503 included — raises `NonRetryableError` and is re-raised on the first
   attempt, while a transport error or a timeout is retried.
-- Poller: one `asyncio.Lock` serializes API calls against the 5 s poll loop;
-  dedupe by poll-check / request id in a plain set, so a retried claim
-  cannot grow the queue and a repeated id is never entertained again.
+- Poller: one `asyncio.Lock` serializes API calls against the poll loop, whose
+  interval is `periodic_fetch_seconds` (1 s by default); a retried claim cannot
+  grow the queue, because the row is left `queued` and the predicate re-claims
+  it only once `queue_timeout` has elapsed.
 - Fetched URLs are re-crawled only when `re_crawl_interval` is configured;
   otherwise `next_crawl_time` is `NULL`.
 - `times_crawled` makes re-crawl loops detectable from the data alone:
@@ -209,10 +208,11 @@ adapters against those same ports: a producer that routes on
 it holds. A consumer group, partition assignment and rebalancing appear there;
 none of it is needed for a single-process crawl reading one queue.
 
-**Bounded dedupe memory.** `InMemoryRequestIdDeduplicator` keeps every request
-id for the life of the run, which is bounded by how long the operator lets the
-crawl run. If that becomes a problem, a sized set that evicts the oldest ids,
-or a TTL window, is the change — the port is one `seen_and_record` call.
+**No dedupe today.** The producer and reader accept an optional `request_id` so
+a networked broker could make a call idempotent, but queue operations are not
+retried, so no id is ever sent twice and nothing deduplicates. A retried
+head-based `commit` would remove more than the batch owns, which is why the
+worker never re-issues one.
 
 **Persisting page bodies.** Nothing writes a page to disk; the fetched body is
 parsed for its links and discarded, because `goal.md` never asks for it. To

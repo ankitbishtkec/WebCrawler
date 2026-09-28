@@ -1,7 +1,7 @@
 """The composition root: the one module that names concrete classes.
 
-Every other module sees a port; this is where the implementations of `plan.md`
-are chosen and connected. Three decisions matter:
+Every other module sees a port; this is where the concrete classes are chosen
+and connected. Three decisions matter:
 
 - One `InMemorySingleTopicSinglePartitionQueue` behind both views, so the
 poller fills the queue the worker reads.
