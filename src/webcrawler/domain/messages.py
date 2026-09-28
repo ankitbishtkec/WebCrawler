@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from webcrawler.domain.custom_url import CustomURL
 
 class QueueOverflowError(RuntimeError):
-    """Raised when an enqueue would exceed the deque max size (goal.md).
+    """Raised when an enqueue would exceed the deque max size.
 
     Args:
     message: The reason the enqueue was rejected.
@@ -20,8 +20,7 @@ class BaseMessage:
     Args:
     url: The URL to crawl. Its identity is the canonical form, so the
     message compares and hashes stably across producers.
-    partition_key: The routing key, `hash(url)` (goal.md), stored
-    verbatim. 
+    partition_key: The routing key, `hash(url)`, stored verbatim.
     """
 
     url: CustomURL

@@ -8,6 +8,7 @@
 - Keep them short and precise.
 - Do cover signaure of function with one line on each input param and output return.
 - **Never be too verbose.**
+- **DO NOT ADD goal.md file reference to any files.**
 - **After every code change, change the comments of ONLY IMPACTED FILES OR FILES USING THE GIVEN CLASSES to reflect code correctly.**
 
 ## Style

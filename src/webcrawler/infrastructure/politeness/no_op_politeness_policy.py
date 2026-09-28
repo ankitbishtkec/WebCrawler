@@ -1,11 +1,7 @@
 """The default politeness policy: no delay at all.
 
-`goal.md:140` asks for a no-op implementation, and makes it the
-default wiring, so an operator who configures nothing crawls as fast as the host
-allows. The wait is a constant rather than a constructor argument because an
-instance that could be told to wait would be a second policy: the delayed one
-already exists and is chosen by configuration instead (composition over
-inheritance, `goal.md:8`).
+A no-op is the default wiring, so an operator who configures nothing crawls as
+fast as the host allows.
 """
 
 from datetime import datetime
@@ -16,19 +12,20 @@ from webcrawler.ports.politeness_policy import PolitenessPolicy
 
 NO_WAIT_MS: int = 0
 
+# The class extends the `PolitenessPolicy` ABC and is extended by nothing, which
+# is what keeps the worker's politeness decision substitutable.
 class NoOpPolitenessPolicy(PolitenessPolicy):
     """Always answers "call now", for a crawl that nobody asked to slow down.
 
-    The class extends the `PolitenessPolicy` ABC and is extended by nothing,
-    which is what keeps the worker's politeness decision substitutable
-    (`goal.md:8`).
+    The wait is a constant, not a constructor argument: a configurable one would
+    be a second policy, and the delayed policy already exists for configuration
+    to choose (composition over inheritance).
     """
 
     def before_fetch(self, url: CustomURL) -> int:
         """Report that no wait is configured, whatever the worker's threshold.
 
-        `0` is the port's "call now" (`goal.md:140`), so the worker takes its
-        sleep branch for every URL and a crawl proceeds at full speed.
+        `0` is the port's "call now", so a crawl proceeds at full speed.
 
         Args:
         url: The URL about to be fetched, ignored because no host is tracked.

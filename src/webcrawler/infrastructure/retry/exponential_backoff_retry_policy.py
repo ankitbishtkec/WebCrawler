@@ -1,29 +1,14 @@
-"""The default retry policy: a per-attempt deadline, backoff, and jitter.
+"""The default retry policy: exponential backoff, jitter, and a per-attempt deadline.
 
-`goal.md:17` requires every implementation that performs I/O to own its retry
-with exponential backoff, jitter, and a timeout, and this is the one loop all of
-them share: the store and the fetcher are handed the same instance, so the
-numbers in `RetrySettings` are read in a single place.
-
-Three decisions are structural rather than incidental:
-
-- The wait before attempt `n`, counted from zero, is
-`min(base_delay_seconds * 2 ** n, max_delay_seconds)` plus
-`random.uniform(0.0, jitter_seconds)`. The cap bounds the growth however
-many attempts are configured, and the spread de-synchronises workers whose
-attempts failed at the same moment. `random` is the module imported here, so
-it is the only seam a test has to patch to make the schedule exact.
-- The deadline is per attempt and not for the whole operation, so one hung
-attempt cannot consume the budget of the attempts that follow it.
-- `operation` is a zero-argument callable rather than a coroutine, so every
-attempt awaits a fresh awaitable: a coroutine object cannot be awaited
-twice, and reusing one would carry the previous attempt's state into the
-next.
+Every implementation that performs I/O owns its retry with this one loop, and
+the store and the fetcher are handed the same instance, so the numbers in
+`RetrySettings` are read in a single place.
 """
 
 import asyncio
-import random
+import random  # the jitter source, and the only seam a test patches
 from collections.abc import Awaitable, Callable
+
 from typing import TypeVar
 
 from webcrawler.domain.errors import NonRetryableError
@@ -38,13 +23,8 @@ class ExponentialBackoffRetryPolicy(RetryPolicy):
     """Runs one fallible operation with a deadline per attempt and a backoff.
 
     The class extends the `RetryPolicy` ABC and is extended by nothing, which is
-    what keeps every collaborator's retry substitutable (`goal.md:8`).
-
-    Args:
-    settings: The attempt budget, backoff, jitter, and per-attempt deadline
-    applied to every operation. The values are read per call, so one
-    instance can be shared by the store and the fetcher without either
-    copying the numbers.
+    what keeps every collaborator's retry substitutable. The settings are read
+    per call, so one instance serves both the store and the fetcher.
     """
 
     def __init__(self, settings: RetrySettings) -> None:
@@ -59,9 +39,7 @@ class ExponentialBackoffRetryPolicy(RetryPolicy):
     async def execute(self, operation: Callable[[], Awaitable[T]]) -> T:
         """Run `operation` until it succeeds or the attempt budget is spent.
 
-        The wait is taken *between* attempts: a success on the first try never
-        sleeps, and an exhausted budget is re-raised without a trailing delay
-        the caller would wait out before it could even handle the error.
+        The wait is taken *between* attempts, never after the last one.
 
         Args:
         operation: A zero-argument callable returning a new awaitable per
@@ -79,8 +57,13 @@ class ExponentialBackoffRetryPolicy(RetryPolicy):
         report success for work that was never attempted.
         """
         last_error: BaseException | None = None
+        # The deadline is per attempt, not for the whole operation, so one hung
+        # attempt cannot consume the budget of the attempts that follow it.
         for attempt in range(self._settings.max_attempts):
             try:
+                # `operation` is a zero-argument callable, not a coroutine, so
+                # each attempt awaits a fresh awaitable: a coroutine cannot be
+                # awaited twice, and reusing one carries the previous state.
                 return await asyncio.wait_for(
                     operation(), self._settings.timeout_seconds
                 )
@@ -100,9 +83,7 @@ class ExponentialBackoffRetryPolicy(RetryPolicy):
     async def _wait_before_retry(self, attempt: int) -> None:
                             """Sleep the backoff owed after the attempt that just failed.
 
-                            The cap applies to the exponential term only, so the total wait is at
-                            most `max_delay_seconds + jitter_seconds`; a test therefore proves the
-                            jitter bound rather than assuming it.
+                            The cap applies to the exponential term only, so the total wait is at most `max_delay_seconds + jitter_seconds`.
 
                             Args:
                             attempt: The zero-based number of the attempt that failed, which
@@ -111,5 +92,8 @@ class ExponentialBackoffRetryPolicy(RetryPolicy):
                             exponential = min(
                                 self._settings.base_delay_seconds * 2**attempt,
                                 self._settings.max_delay_seconds)
+                            # The cap bounds the growth however many attempts are
+                            # configured, and the spread de-synchronises workers
+                            # whose attempts failed at the same moment.
                             jitter = random.uniform(0.0, self._settings.jitter_seconds)
                             await asyncio.sleep(exponential + jitter)

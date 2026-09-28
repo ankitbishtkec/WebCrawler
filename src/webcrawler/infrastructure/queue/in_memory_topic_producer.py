@@ -15,12 +15,9 @@ from webcrawler.ports.topic_producer import TopicProducer
 class InMemoryTopicProducer(TopicProducer):
     """Append messages into the shared queue.
 
-    The topic name is accepted because the port carries it and ignored
-    because the queue holds one deque; the `partition_key` each message
-    carries is ignored the same way (goal.md:118).
-
-    It extends the `TopicProducer` ABC and is extended by nothing, which is
-    what keeps the write side substitutable (goal.md:8).
+    The topic and each message's `partition_key` are accepted because the port
+    carries them and ignored because the queue holds one deque. Extends the
+    `TopicProducer` ABC and nothing extends it.
 
     Args:
     topic: The topic name from the port, recorded and never consulted.
@@ -50,8 +47,7 @@ class InMemoryTopicProducer(TopicProducer):
     ) -> bool:
         """Append one message to the tail of the queue.
 
-        The poller uses `enqueue_many`, so this single-message API is for tests
-        and callers outside the crawl loop.
+        The poller uses `enqueue_many`; this API is for tests and direct callers.
 
         Args:
         message: The message to enqueue, carrying the URL and the
@@ -74,12 +70,7 @@ class InMemoryTopicProducer(TopicProducer):
     ) -> list[bool]:
         """Enqueue a batch, reporting one outcome per input message.
 
-        No dedupe: the caller owns that, because only the caller knows
-        whether a repeated URL is a retry or new work.
-        An overflowed message is reported as `False` and the rest of the
-        batch is still enqueued, so one full topic cannot discard a poll's
-        whole claim; the row stays `queued` in the database and the first
-        poll after `queue_timeout` re-claims it.
+        No dedupe: only the caller knows if a repeat is a retry or new work.
 
         Args:
         messages: The batch to enqueue, in the order given.
@@ -90,6 +81,8 @@ class InMemoryTopicProducer(TopicProducer):
         True where the message was enqueued, False where it
         overflowed.
         """
+        # An overflow is `False` and the rest still enqueued, so one full topic
+        # cannot discard a poll's claim: its rows stay `queued` for the next poll.
         results: list[bool] = []
         for message in messages:
             try:

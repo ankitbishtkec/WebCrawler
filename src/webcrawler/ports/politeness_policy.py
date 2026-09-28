@@ -1,8 +1,7 @@
-"""The politeness port (goal.md:177).
+"""The politeness port.
 
-`goal.md:140` puts the decision in an interface with a no-op default, so the
-crawl is as fast as the host permits while a courteous delay stays one
-constructor argument away.
+The decision lives in an interface with a no-op default, so the crawl is as fast
+as the host permits while a courteous delay stays one constructor argument away.
 """
 
 from abc import ABC, abstractmethod
@@ -16,21 +15,19 @@ class PolitenessPolicy(ABC):
     """Decides how long a worker must wait before its next request.
 
     The policy returns a number and never sleeps: the worker defers the URL to
-    that time, so one slow URL cannot stall its batch (goal.md:177).
+    that time, so one slow URL cannot stall its batch.
     """
     @abstractmethod
     def before_fetch(self, url: CustomURL) -> int:
         """Return the milliseconds to wait before fetching `url`.
 
-        `0` means fetch now, and any other value is the delay the worker either
-        sleeps for or defers the URL by, per `goal.md:140`.
+        `0` means fetch now; any other value is the delay the worker sleeps for or defers the URL by.
 
         Args:
         url: The URL about to be fetched, so a per-host policy can weigh it.
 
         Returns:
-            int: Milliseconds to wait before issuing the request; `0` for no
-                wait at all.
+            int: Milliseconds to wait before issuing the request; `0` for none.
 
         Synchronous: pure computation, no I/O.
         """
@@ -39,8 +36,7 @@ class PolitenessPolicy(ABC):
     def record_fetch(self, now: datetime, url: CustomURL, result: BaseResult) -> None:
         """Record one completed attempt, so the next delay can be better.
 
-        The shipped no-op ignores everything; a learning policy uses `result`
-        to back off after a failure.
+        The shipped no-op ignores everything; a learning policy uses `result` to back off after a failure.
 
         Args:
         now: When the attempt finished, in UTC.

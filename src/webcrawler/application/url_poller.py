@@ -1,27 +1,8 @@
-"""The URL poller: the producer half of the crawl loop (goal.md:55-113).
+"""The URL poller: the producer half of the crawl loop, behind `CrawlQueuer`.
 
-`goal.md:56` asks for one module that polls the URL state store and feeds the
-queue, and `goal.md:106` asks for it behind an interface, which is
-`CrawlQueuer`. This module is that implementation: every claim is the
-repository's own atomic `UPDATE ... RETURNING`, so the poller adds no state
-machine of its own and decides nothing the store does not already decide
-atomically (goal.md:109).
-
-Three choices carry the design, and each is a decision rather than an obvious
-line of code:
-
-- One `asyncio.Lock`, acquired exactly once at each of the three entry
-  points. `goal.md:109` needs no lock for the state transition, because the
-  claim's timeout predicates cannot double-claim a row; the lock here solves
-  a different problem, `goal.md:107`: an API call must not interleave with a
-  periodic poll, so the two never issue overlapping claims or feeds.
-- No dedupe gate. The queue's operations are not retried, so no request id is
-  ever sent twice; the optional `request_id` on the ports stays as the
-  extension point for a networked broker, where a retried send would
-  otherwise duplicate the message.
-- The first poll runs immediately and each later poll one
-  `periodic_fetch_seconds` after the previous claim, so a crawl that starts
-  with due rows queues them without first waiting out an interval.
+It polls the URL state store and feeds the queue in one bulk call per claim.
+The claim is the repository's own atomic statement, so this module holds no
+state machine, no lock, and no dedupe gate of its own.
 """
 
 import asyncio
@@ -40,47 +21,26 @@ from webcrawler.ports.url_state_repository import URLStateRepository
 class URLPoller(CrawlQueuer):
     """Polls the state store and feeds the queue one claimed batch at a time.
 
-    One instance is meant to run: `goal.md:107` rules out a second poller. The
-    single lock upholds that without a registry — every entry point serializes
-    through it, so no claim or feed interleaves with another.
-
-    Args:
-        repository: The crawl state store, the only judge of which rows are
-            claimable, so the poller never re-implements a predicate
-            (goal.md:109).
-        producer: The queue's write side, fed in bulk so one poll costs one
-            call (goal.md:123).
-        periodic_fetch_seconds: The interval between two periodic polls.
-        periodic_max_items: The row limit each periodic poll claims, `-1`
-            meaning no limit (goal.md:59).
-        max_items_to_queue: The row limit `queue_candidates` falls back to
-            when its own `max_items` is None, defaulting to `-1`, no limit
-            (goal.md:59).
-        job_timeout: The `started_crawl` staleness timeout, shared with every
-            claim so the poller and the store agree on one predicate.
-        queue_timeout: The `queued` staleness timeout, which is also how a
-        row whose queue send was rejected is recovered by a later poll.
-        time_provider: The only source of "now" for a claim, so a poll's
-        instant is the application's guarantee rather than a second
-        clock's.
-        logger: The injected logger. A rejected enqueue is WARNING, because the
-            row's recovery depends on a later poll seeing it.
+    One instance is meant to run: a second poller is ruled out, and
+    one construction in `main.py` is what ensures it. No lock serialises the
+    entry points; the store's own claim is what stops two claims colliding.
     """
 
     def __init__(
+
         self,
         repository: URLStateRepository,
         producer: TopicProducer,
         *,
         periodic_fetch_seconds: float = 1.0,
         periodic_max_items: int = -1,
-        max_items_to_queue: int = -1,  # goal.md:59 default: no limit
+        max_items_to_queue: int = -1,  # default: no limit
         job_timeout: timedelta,
         queue_timeout: timedelta,
         time_provider: TimeProviderFactory,
         logger: logging.Logger,
     ) -> None:
-        """Hold the ports, the schedule, and the one lock every entry shares.
+        """Hold the ports and the schedule the poller was configured with.
 
         Args:
             repository: The crawl state store.
@@ -98,41 +58,32 @@ class URLPoller(CrawlQueuer):
         self._periodic_fetch_seconds = periodic_fetch_seconds
         self._periodic_max_items = periodic_max_items
         self._max_items_to_queue = max_items_to_queue
+        # One source for both staleness timeouts and one for "now", so the
+        # poller and the store agree on one predicate and on one instant.
         self._job_timeout = job_timeout
         self._queue_timeout = queue_timeout
         self._time_provider = time_provider
         self._logger = logger
-        self._lock = asyncio.Lock()
 
     async def run(self) -> None:
         """Poll the store forever, one claim and one bulk feed per poll.
 
-        The first poll runs immediately and each later poll one
-        `periodic_fetch_seconds` after the previous claim, so a crawl that
-        starts with due rows queues them without waiting out an interval.
-
-        Each poll mints a fresh request id and hands it to the one bulk feed
-        for the rows the claim returned, so a networked broker could make that
-        feed idempotent. Queue growth is bounded by that single `enqueue_many`.
+        Each poll mints a fresh request id, so a broker could dedupe the feed.
 
         Raises:
-            Exception: Whatever a claim or the bulk feed raises, propagated
-                unchanged; the repository's own retries are already spent by
-                then, so the loop does not swallow an exhausted store.
             asyncio.CancelledError: When the task is cancelled, which is how
-                the orchestrator stops the poller.
+            the orchestrator stops the poller.
         """
         while True:
-            # The public APIs are never called from here: asyncio.Lock is not
-            # re-entrant, so that would deadlock on the lock held.
-            async with self._lock:
-                now = self._time_provider.now()
-                await self._claim_and_enqueue(
-                    uuid.uuid4().hex,
-                    now,
-                    urls=None,
-                    max_items=self._periodic_max_items,
-                )
+            # The first poll runs at once and each later one waits out an
+            # interval, so a crawl that starts with due rows queues them
+            # without first waiting.
+            await self._claim_and_enqueue(
+                None,
+                self._time_provider.now(),
+                urls=None,
+                max_items=self._periodic_max_items,
+            )
             await asyncio.sleep(self._periodic_fetch_seconds)
 
     async def _claim_and_enqueue(
@@ -145,13 +96,7 @@ class URLPoller(CrawlQueuer):
     ) -> None:
         """Claim this request's rows and feed them in one bulk call.
 
-        The caller must already hold `_lock`: this method is the shared body
-        of the three entry points and exists precisely so none of them
-        reacquires the non-re-entrant lock.
-
-        The bulk feed is issued even for an empty claim: one code path, so an
-        empty poll costs the same single call a full one does and the
-        producer's result list stays the only place a per-row outcome exists.
+        The shared body of all three entry points, so one guard covers them all.
 
         Args:
             request_id: The id handed to the bulk feed, or None to mint one
@@ -164,54 +109,73 @@ class URLPoller(CrawlQueuer):
                 it with no limit.
             max_items: The claim's row limit, already resolved by the
                 caller, which is why this takes a plain `int` and not
-                `int | None`; `-1` means no limit (goal.md:59).
+                `int | None`; `-1` means no limit.
 
         Raises:
-            Exception: Whatever the claim or the bulk feed raises, propagated
-                unchanged; a partial feed is not reported as success.
+        Exception: Nothing is raised
         """
-        if request_id is None:
-            request_id = uuid.uuid4().hex
-        if urls is None:
-            rows = await self._repository.claim_candidates(
-                now,
-                max_items,
-                job_timeout=self._job_timeout,
-                queue_timeout=self._queue_timeout,
+        # Only the claim is guarded: real I/O against a store that documents
+        # failures, and a failure strands rows in `queued` until `queue_timeout`
+        # elapses. The feed is not: a networked producer may raise, while the
+        # shipped in-memory one never does and reports a full queue as `False`.
+        try:
+            # The claim is the store's own atomic `UPDATE ... RETURNING` and
+            # the only judge of claimability, so no lock and no predicate is
+            # re-implemented here: the timeout predicates cannot double-claim
+            # a row, and the store's own lock (`BEGIN IMMEDIATE`) serialises it.
+            if urls is None:
+                rows = await self._repository.claim_candidates(
+                    now,
+                    max_items,
+                    job_timeout=self._job_timeout,
+                    queue_timeout=self._queue_timeout,
+                )
+            else:
+                rows = await self._repository.claim_urls(
+                    urls,
+                    now,
+                    max_items,
+                    job_timeout=self._job_timeout,
+                    queue_timeout=self._queue_timeout,
+                )
+        except Exception as error:
+            # Logged and returned, so a failing poll costs one poll and neither
+            # the poller nor any caller dies; the stranded row is re-claimed once
+            # `queue_timeout` elapses, not on the next poll.
+            self._logger.error(
+                "claiming due urls failed, so nothing is queued this round and "
+                "a stranded row is re-claimed once %s has elapsed: %s",
+                self._queue_timeout,
+                error,
             )
-        else:
-            rows = await self._repository.claim_urls(
-                urls,
-                now,
-                max_items,
-                job_timeout=self._job_timeout,
-                queue_timeout=self._queue_timeout,
-            )
+            return
         # partition_key is hash(url), stored verbatim: a negative key already
-        # routes non-negatively under the producer's modulo (goal.md:113).
-        # No retry policy here: the repository retries its own statements and
-        # the in-memory producer cannot fail, so there is nothing left to retry.
+        # routes non-negatively under the producer's modulo. One bulk call per
+        # poll, issued even for an empty claim, so one path serves both.
         results = await self._producer.enqueue_many(
             [BaseMessage(url, partition_key=hash(url)) for url in rows],
             request_id,
         )
+        # The shipped feed holds no `await`, so nothing interleaves between the
+        # claim committing and these messages landing. It is not retried, so no
+        # dedupe gate and no request id sent twice; `request_id` is the ports'
+        # extension point for a networked broker, whose retried send duplicates.
         for url, enqueued in zip(rows, results):
             if not enqueued:
+                # WARNING, not ERROR: the row stays `queued` and a later poll
+                # re-claims it, so its recovery depends on this being visible.
                 self._logger.warning(
                     "queueing %s was rejected, so it stays queued and the "
                     "first poll %s from now re-claims it",
                     url.get_url(),
                     self._queue_timeout,
                 )
-
     async def enqueue_urls(
         self, urls: list[CustomURL], request_id: str | None = None
     ) -> None:
-        """Queue the caller's URLs now, and nothing else (goal.md:103).
+        """Queue the caller's URLs now, and nothing else.
 
-        Only the rows the claim returns are fed, so a URL that is already
-        being processed, or that does not exist, is quietly left alone: the
-        store is the only judge of eligibility (goal.md:109).
+        Only the rows the claim returns are fed; a failed claim is swallowed.
 
         Args:
             urls: The URLs to queue, expected to exist as rows already, which
@@ -220,40 +184,37 @@ class URLPoller(CrawlQueuer):
                 fresh one inside.
 
         Raises:
-            Exception: Whatever the claim or the bulk feed raises, propagated
-                unchanged; a partial queue is not reported as success.
+        Exception: Nothing is raised
         """
-        async with self._lock:
-            await self._claim_and_enqueue(
-                request_id,
-                self._time_provider.now(),
-                urls=urls,
-                max_items=-1,
-            )
+        await self._claim_and_enqueue(
+            request_id,
+            self._time_provider.now(),
+            urls=urls,
+            max_items=-1,
+        )
 
     async def queue_candidates(
         self,
         now: datetime,
+        request_id: str,
         max_items: int | None = None,
-        request_id: str | None = None,
     ) -> None:
-        """Queue candidate rows on demand, up to the resolved limit (goal.md:104).
+        """Queue candidate rows on demand, up to the resolved limit.
+
+        Best effort: a failed claim is logged, so a later poll re-claims it.
 
         Args:
             now: The instant the claim's predicates are evaluated against.
+            request_id: The id handed to the bulk feed.
             max_items: This call's row limit, or None to fall back to
-                `max_items_to_queue` (`goal.md:59`).
-            request_id: The id handed to the bulk feed, or None to mint a
-                fresh one inside.
+                `max_items_to_queue`.
 
         Raises:
-            Exception: Whatever the claim or the bulk feed raises, propagated
-                unchanged; a partial queue is not reported as success.
+        Exception: Nothing is raised
         """
-        async with self._lock:
-            await self._claim_and_enqueue(
-                request_id,
-                now,
-                urls=None,
-                max_items=self._max_items_to_queue if max_items is None else max_items,
-            )
+        await self._claim_and_enqueue(
+            request_id,
+            now,
+            urls=None,
+            max_items=self._max_items_to_queue if max_items is None else max_items,
+        )

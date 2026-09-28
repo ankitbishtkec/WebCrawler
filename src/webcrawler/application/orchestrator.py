@@ -1,11 +1,8 @@
-"""The orchestrator: the one owner of the crawl loop's lifetime (goal.md:13).
+"""The orchestrator: the one owner of the crawl loop's lifetime.
 
-Creates exactly one poller task (goal.md:107) and one worker task, and is the
-only place either is created or stopped. Every collaborator is injected, so
-`main.py` picks the concrete classes and this class only picks when things run.
-
-`run` is wrapped in `try/finally`, so a `Ctrl+C` during the seed read still
-closes the store, which joins the aiosqlite thread.
+It creates exactly one poller task and one worker task and is the only place
+either is created or stopped; every collaborator is injected, so `main.py` picks
+the concrete classes and this class only picks when things run.
 """
 
 import asyncio
@@ -18,16 +15,7 @@ from webcrawler.ports.url_state_repository import URLStateRepository
 
 
 class Orchestrator:
-    """Runs the poller and the worker on one event loop (goal.md:13).
-
-    Args:
-    repository: The crawl state store, closed on every exit of `run`.
-    poller: The queuer and the one poll loop this class runs.
-    worker: The crawl consumer, started once the seed is queued.
-    seed_line: The operator's single seed URL, read before any task starts.
-    logger: The injected logger; DEBUG for no seed, WARNING for a rejected
-        one, ERROR for an unrecordable one or a failed task.
-    """
+    """Runs the poller and the worker on one event loop."""
 
     def __init__(
         self,
@@ -58,15 +46,7 @@ class Orchestrator:
     async def run(self) -> None:
         """Seed the crawl once, then run the poller and the worker together.
 
-        `main.py` read the seed before this was called, so it is validated as a
-        single `CustomURL`, inserted with `create_urls`, then queued with
-        `enqueue_urls`. The insert must precede the enqueue, because the queuer
-        claims rows that must already exist. Both tasks start only after that,
-        so exactly one poller task exists and none runs with nothing to crawl.
-
-        `asyncio.TaskGroup` runs the two tasks, so one failing takes the other
-        with it. The group awaits every task before it returns, so the `finally`
-        needs only to close the store.
+        The seed is inserted before it is queued, since the queuer claims rows.
 
         Args:
         None.
@@ -74,7 +54,11 @@ class Orchestrator:
         Returns:
         None: Always. A failed task is logged at ERROR and ends the session.
         """
+        # `try/finally` so a Ctrl+C during the seed read still closes the store,
+        # which joins the aiosqlite thread, and so the store closes on every exit.
         try:
+            # Levels mark how far the seed got: DEBUG for none entered, WARNING
+            # for one rejected as a URL, ERROR for one that could not be stored.
             if not self._seed_line:
                 self._logger.debug(
                     "no seed URL was entered, so there is nothing to crawl "
@@ -106,6 +90,8 @@ class Orchestrator:
                 "the crawl is running from the seed %s; interrupt it to stop",
                 seed.get_url(),
             )
+            # A group takes both tasks down if one fails and awaits each before it
+            # returns, so the `finally` needs only to close the store.
             try:
                 async with asyncio.TaskGroup() as group:
                     group.create_task(self._poller.run())

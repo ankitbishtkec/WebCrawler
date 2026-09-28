@@ -1,18 +1,10 @@
 """The composition root: the one module that names concrete classes.
 
-Every other module sees a port; this is where the concrete classes are chosen
-and connected. Three decisions matter:
-
-- One `InMemorySingleTopicSinglePartitionQueue` behind both views, so the
-poller fills the queue the worker reads.
-- One `ExponentialBackoffRetryPolicy` shared by the store and the fetches,
-so every I/O owner retries with the same settings (`goal.md:17`).
-- One `NoOpPolitenessPolicy`: it reports no wait, so a crawl is not
-throttled. A delaying policy is an extension (README).
-
-Importing this module has no side effects: the console loop starts only under
-the `__main__` guard.
+Every other module sees a port, so this is where the concrete classes are
+chosen and connected: one queue behind both queue views, one retry policy
+for the store and the fetches, one politeness policy that never waits.
 """
+
 
 import asyncio
 import logging
@@ -27,7 +19,10 @@ from webcrawler.infrastructure.db.sqlite_url_state_repository import (
     SQLiteURLStateRepository)
 from webcrawler.infrastructure.fetch.aiohttp_web_page_fetcher import (
     AiohttpWebPageFetcher)
-from webcrawler.infrastructure.fetch.headers_middleware import HeadersMiddleware
+from webcrawler.infrastructure.fetch.headers_middleware import (
+    DEFAULT_HEADERS,
+    HeadersMiddleware,
+)
 from webcrawler.infrastructure.html.html_link_extractor import HtmlLinkExtractor
 from webcrawler.infrastructure.politeness.no_op_politeness_policy import (
     NoOpPolitenessPolicy)
@@ -59,19 +54,10 @@ RETRY_SETTINGS: RetrySettings = RetrySettings(
     timeout_seconds=10.0)
 # Several sites answer 503 to a non-browser agent, so the crawler presents as
 # a normal browser.
-USER_AGENT: str = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
-    )
-
 async def main() -> None:
     """Wire every concrete class to its port and run one seed-once crawl.
 
-    The order is the plan's: logging is configured before
-    anything that logs is constructed, the store is initialized before the
-    crawl starts, the worker's queuer is the poller itself, and the one
-    blocking console read happens here — before any task exists, so the
-    event loop is never blocked and no second seed can be entered.
+    The seed is read before any task exists, so the loop is never blocked.
 
     Raises:
     asyncio.CancelledError: When the run is interrupted; the
@@ -81,6 +67,7 @@ async def main() -> None:
     Exception: Whatever a collaborator raises outside the orchestrator's
     handled seed paths, propagated unchanged.
     """
+    # Logging first: everything that logs is constructed after it.
     logger = configure_logging(level=logging.INFO)
     print(
         "Enter the seed URL to crawl, then press Ctrl+C at any time to "
@@ -93,14 +80,14 @@ async def main() -> None:
     queue = InMemorySingleTopicSinglePartitionQueue()
     producer = InMemoryTopicProducer(TOPIC, queue, logger)
     reader = InMemoryTopicReader(TOPIC, CONSUMER_GROUP_ID, queue, logger)
-    # One retry policy, two owners: the store and the fetches (goal.md:17).
+    # One retry policy, two owners: the store and the fetches.
     retry_policy = ExponentialBackoffRetryPolicy(RETRY_SETTINGS)
     repository = SQLiteURLStateRepository(DB_FILE, retry_policy, time_provider, logger)
     await repository.initialize()
     # The only source of request headers, applied in order; an auth middleware
     # belongs here too (README's Extensions section).
     request_middlewares: tuple[RequestMiddleware, ...] = (
-        HeadersMiddleware({"User-Agent": USER_AGENT}),)
+        HeadersMiddleware(DEFAULT_HEADERS),)
     fetcher = AiohttpWebPageFetcher(
         RETRY_SETTINGS.timeout_seconds,
         logger,
@@ -133,5 +120,5 @@ async def main() -> None:
     await orchestrator.run()
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # importing this module has no side effects
     asyncio.run(main())

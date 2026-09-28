@@ -1,19 +1,8 @@
 """The one bounded deque both queue views are composed over.
 
-`InMemorySingleTopicSinglePartitionQueue` is the single object injected into
-BOTH `InMemoryTopicProducer` and `InMemoryTopicReader`: if the two hold
-different instances the poller fills a queue the worker never reads, so the
-composition root constructs exactly one and hands it to both (goal.md:136).
-
-Two deques and nothing else: the crawl topic and its deadletter topic, and no
-topics, no partitions, no connected-reader list, no reader id. The prod-queue
-params (topic, consumer group id, message `partition_key`) are accepted by the
-adapters and ignored here, so a real prod queue can replace them without
-touching a caller (goal.md:118).
-
-No lock, deliberately: the work is CPU-bound on the single event loop and the
-shipped run path has exactly one reader, so there is no concurrent mutation
-to serialize (goal.md:117).
+The same instance is injected into BOTH `InMemoryTopicProducer` and
+`InMemoryTopicReader`; two instances would let the poller fill a queue the
+worker never reads. Two deques and nothing else.
 """
 
 from collections import deque
@@ -22,7 +11,7 @@ from typing import Final
 
 from webcrawler.domain.messages import BaseMessage, QueueOverflowError
 
-# The capacity of goal.md:116.
+# The crawl topic's capacity, in messages.
 DEFAULT_MAX_SIZE: Final = 10_000
 
 # The deadletter capacity, bounded the same way but independently, so a full
@@ -33,17 +22,9 @@ DEFAULT_MAX_DEADLETTER_SIZE: Final = 10_000
 class InMemorySingleTopicSinglePartitionQueue:
     """The bounded FIFO the crawl is served from, and its deadletter FIFO.
 
-    The two adapters are composed over one instance of this and never
-    subclass it, so neither view can hold a message the other cannot see
-    (goal.md:136).
-
-    Args:
-        max_size: The crawl queue's capacity, checked on append rather than via
-            `deque(maxlen=...)`, because a `maxlen` deque discards from the
-            opposite end and would drop uncommitted head messages instead of
-            rejecting the new one (goal.md:116).
-        max_deadletter_size: The deadletter queue's capacity, checked the same
-            way for the same reason.
+    Both adapters compose over one instance and never subclass it, so neither
+    view can hide a message from the other. No lock: the work is CPU-bound on
+    the single event loop with one reader, so nothing is left to serialise.
     """
 
     def __init__(
@@ -59,6 +40,9 @@ class InMemorySingleTopicSinglePartitionQueue:
             max_deadletter_size: The deadletter queue's capacity, in messages.
         """
         self._max_size = max_size
+        # Two deques and nothing else: no topics, no partitions, no connected
+        # reader list, no reader id. The prod-queue params live in the adapters,
+        # accepted there and ignored, so a real queue can replace them.
         self._messages: deque[BaseMessage] = deque()
         self._max_deadletter_size = max_deadletter_size
         self._deadletters: deque[BaseMessage] = deque()
@@ -66,8 +50,7 @@ class InMemorySingleTopicSinglePartitionQueue:
     def enqueue(self, message: BaseMessage) -> None:
         """Append one message to the tail.
 
-        The message is stored verbatim; its `partition_key` is accepted for a
-        future prod queue and ignored here, there is no routing to do.
+        Stored verbatim; `partition_key` is accepted for a prod queue and ignored.
 
         Args:
             message: The message to append, carrying the `partition_key` the
@@ -75,8 +58,11 @@ class InMemorySingleTopicSinglePartitionQueue:
 
         Raises:
             QueueOverflowError: If the deque already holds `max_size`
-                messages, leaving it unchanged (goal.md:116).
+                messages, leaving it unchanged.
         """
+        # Checked on append, not via `deque(maxlen=...)`: a maxlen deque
+        # discards from the opposite end, dropping uncommitted head messages
+        # instead of rejecting the new one.
         if len(self._messages) >= self._max_size:
             raise QueueOverflowError(
                 f"the queue already holds {len(self._messages)} "
@@ -87,8 +73,7 @@ class InMemorySingleTopicSinglePartitionQueue:
     def peek(self, n: int) -> list[BaseMessage]:
         """Read the head without removing anything.
 
-        Non-reserving, because the shipped run path has exactly one reader,
-        so there is nothing to hold a claim against (goal.md:151).
+        Non-reserving: one reader in the shipped run path, so nothing to hold.
 
         Args:
             n: The largest number of items wanted.
@@ -104,9 +89,7 @@ class InMemorySingleTopicSinglePartitionQueue:
     def commit(self, count: int) -> None:
         """Remove up to `count` messages from the head.
 
-        Head-based and non-idempotent: a second call with the same count
-        removes a second time. That is safe only because the shipped run
-        path has exactly one reader (goal.md:140).
+        Head-based and non-idempotent, safe only with the shipped one reader.
 
         Args:
             count: How many messages to remove, bounded by the messages that
@@ -118,8 +101,7 @@ class InMemorySingleTopicSinglePartitionQueue:
     def enqueue_deadletter(self, message: BaseMessage) -> None:
         """Append one message to the tail of the deadletter deque.
 
-        The message is stored verbatim, exactly as the crawl deque stores one,
-        so a parked message is still the same object a reader could have peeked.
+        Stored verbatim, exactly as the crawl deque stores one.
 
         Args:
             message: The message to park, carrying the URL it failed on.
@@ -128,6 +110,7 @@ class InMemorySingleTopicSinglePartitionQueue:
             QueueOverflowError: If the deadletter deque already holds
                 `max_deadletter_size` messages, leaving it unchanged.
         """
+        # Checked the same way, for the same reason as the crawl deque.
         if len(self._deadletters) >= self._max_deadletter_size:
             raise QueueOverflowError(
                 f"the deadletter queue already holds {len(self._deadletters)} "

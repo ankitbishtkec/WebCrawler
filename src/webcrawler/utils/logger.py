@@ -1,4 +1,8 @@
-"""The console logger: one stdlib stream handler, set up once at startup.: every major class takes a `logging.Logger`, `log.debug` for detail, `log.info` only for a fetched URL and its found links, and `log.warning`/`log.error` for a degraded or failed step. `main.py` calls `configure_logging` first.
+"""The console logger: one stdlib stream handler, set up once at startup.
+
+Every major class takes a `logging.Logger`: `log.debug` for detail, `log.info` only for a
+fetched URL and its found links, `log.warning`/`log.error` for a degraded or failed step.
+`main.py` calls `configure_logging` first.
 """
 
 import logging
@@ -12,9 +16,7 @@ HANDLER_NAME: str = "webcrawler-console"
 def configure_logging(level: int = logging.INFO) -> logging.Logger:
     """Send the project logger to the console at the given level.
 
-    The handler is added once and never replaced, so a second call only moves
-    the level. `level` is the only filter: DEBUG or INFO is chosen here rather
-    than at each call site.
+    `level` is the only filter, chosen here rather than at each call site.
 
     Args:
     level: The lowest level a record must have to be printed.
@@ -24,13 +26,14 @@ def configure_logging(level: int = logging.INFO) -> logging.Logger:
     """
     project = logging.getLogger(ROOT_LOGGER_NAME)
     project.setLevel(level)
+    # The handler is added once and never replaced, so a second call only moves the level.
     if not any(handler.get_name() == HANDLER_NAME for handler in project.handlers):
         print(f"Logging to console at level {logging.getLevelName(level)}")
         handler = logging.StreamHandler()
         handler.set_name(HANDLER_NAME)
         formatter = logging.Formatter(LOG_FORMAT, DATE_FORMAT)
-        # Every time here is UTC (goal.md:25); converter is the documented
-        # attribute for the clock a Formatter renders with.
+        # Every time here is UTC; converter is the documented attribute for the
+        # clock a Formatter renders with.
         formatter.converter = time.gmtime
         handler.setFormatter(formatter)
         project.addHandler(handler)

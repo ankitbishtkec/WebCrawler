@@ -14,18 +14,14 @@ from webcrawler.ports.topic_reader import TopicReader
 class InMemoryTopicReader(TopicReader):
     """Read the shared queue's single deque.
 
-    The constructor params match a real prod queue for future-proofing: the
-    topic and the `consumer_group_id` are recorded and never consulted, and no
-    reader id is kept — one deque, no connected-reader list (goal.md:118).
-
-    It extends the `TopicReader` ABC and is extended by nothing, which is
-    what keeps the read side substitutable (goal.md:8).
+    The topic and the `consumer_group_id` are recorded and never consulted, and
+    no reader id is kept: one deque, no connected-reader list. Extends the
+    `TopicReader` ABC and nothing extends it.
 
     Args:
     topic: The topic name from the port, recorded and never consulted.
     consumer_group_id: The group this reader belongs to. A no-op for
-    this implementation, kept because the interface carries it
-    (goal.md:120).
+    this implementation, kept because the interface carries it.
     queue: The shared queue. It must be the same instance the
     producer writes to, or the reader reads an empty queue.
     logger: The injected logger, which records the join at INFO.
@@ -71,9 +67,7 @@ class InMemoryTopicReader(TopicReader):
     ) -> None:
         """Remove `min(len(messages), available)` items from the head.
 
-        Head-based and non-idempotent: committing the same batch twice
-        removes twice as many, which is safe only because the shipped run
-        path has exactly one reader.
+        Head-based and non-idempotent, safe only with the shipped one reader.
 
         Args:
         messages: The batch being acknowledged. Only its count is used, so

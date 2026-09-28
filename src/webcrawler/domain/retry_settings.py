@@ -1,9 +1,8 @@
 """The retry knobs shared by every implementation that performs I/O.
 
-`goal.md` requires each of those implementations to own its retry with
-exponential backoff, jitter, and a timeout. The values live here as one frozen
-value type so the policy, the store, and the fetcher's socket timeout all read
-the same numbers.
+Each I/O implementation owns its retry with exponential backoff, jitter, and a
+timeout. The values live here as one frozen value type so the policy, the store,
+and the fetcher's socket timeout all read the same numbers.
 """
 
 from dataclasses import dataclass
@@ -22,8 +21,8 @@ class RetrySettings:
     jitter_seconds: Width of the uniform random spread added on top of each
     delay, which de-synchronises concurrent workers retrying in step.
     timeout_seconds: The per-attempt deadline. An attempt overrunning it is
-    abandoned and retried, and the blocking HTTP client reuses it as
-    its socket timeout (goal.md).
+    abandoned and retried, and the blocking HTTP client reuses it as its
+    socket timeout.
     """
 
     max_attempts: int

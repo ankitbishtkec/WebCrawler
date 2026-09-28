@@ -1,24 +1,9 @@
 """The default page fetcher: `aiohttp`, a natively async client.
 
-`goal.md:11` asks for an interface with a simple default implementation and
-`goal.md:16` forbids bypassing it, so this is the only transport the worker
-uses. Three decisions are structural rather than incidental:
-
-- `aiohttp` is the client: it awaits its sockets on the
-single event loop of `goal.md:13`, so no thread bridge is started here.
-- The attempt is bounded in two places: the session is built with
-`aiohttp.ClientTimeout(total=RetrySettings.timeout_seconds)`, which
-bounds the socket side, and the per-call `RetryPolicy` bounds the await
-side with its per-attempt deadline.
-- Retry belongs to the caller: this class holds no attempt counter and no
-sleep, it hands one attempt to the injected `RetryPolicy` per call, which
-keeps the backoff numbers in one place (`goal.md:141`).
-
-A redirect is followed wherever the server sends it, so a same-host page could
-in principle lead off-host. Closing that would mean a redirect-blocking
-handler, and the crawler scope of `goal.md:1` is stated over links, not over
-server responses.
+It is the only transport the worker uses, and it bounds each attempt twice:
+the session owns the socket side, the injected `RetryPolicy` the await side.
 """
+
 
 import logging
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -49,22 +34,8 @@ class AiohttpWebPageFetcher(WebPageFetcher):
     """Fetches one page per call through the native-async `aiohttp` client.
 
     The class extends the `WebPageFetcher` ABC and is extended by nothing, which
-    is what keeps the worker's transport substitutable (`goal.md:8`).
-
-    Args:
-    timeout_seconds: The socket-side bound, handed to the client as
-    `aiohttp.ClientTimeout(total=...)`. It is
-    `RetrySettings.timeout_seconds`, so an attempt the policy abandons
-    still ends on its own instead of holding a socket for ever.
-    logger: The injected logger. An attempt is DEBUG, a failure is ERROR, and
-        a success is INFO.
-    session_factory: Builds one session per `fetch` call as an async context
-    manager. The default opens a real `aiohttp.ClientSession`; tests
-    inject a fake so no socket is ever opened.
-    middlewares: Applied, in order, to each request's headers just before
-    it is sent, so auth and header policies compose without the fetcher
-    knowing any of them. Empty by default, so a request then carries
-    no header the caller did not ask for.
+    is what keeps the worker's transport substitutable. An attempt logs at
+    DEBUG, a failure at ERROR, and a success at INFO.
     """
 
     def __init__(
@@ -92,7 +63,12 @@ class AiohttpWebPageFetcher(WebPageFetcher):
         self._timeout_seconds = timeout_seconds
         self._logger = logger
         self._retry_policy = retry_policy
+        # Applied in order to each request's headers just before the send, so
+        # auth and header policies compose without this class knowing them.
+        # Empty by default, so the user agent below is the only header sent.
         self._middlewares = tuple(middlewares)
+        # The default opens a real `aiohttp.ClientSession`; tests inject a fake,
+        # so no socket is ever opened.
         self._session_factory: Callable[[], AsyncContextManager[aiohttp.ClientSession]] = (
             session_factory
             if session_factory is not None
@@ -108,8 +84,10 @@ class AiohttpWebPageFetcher(WebPageFetcher):
         context manager closes it, so the fetcher owns no session
         between calls.
         """
-        # The session timeout bounds the socket side, independent of the retry
-        # policy that bounds the await side.
+        # The client awaits its sockets on the single event loop, so no thread
+        # bridge is started here. The session bounds the socket side, the retry
+        # policy the await side, so an attempt the policy abandons still ends on
+        # its own instead of holding a socket for ever.
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=self._timeout_seconds)
             ) as session:
@@ -118,9 +96,7 @@ class AiohttpWebPageFetcher(WebPageFetcher):
     async def fetch(self, url: CustomURL) -> str:
         """Return one page's body, retried by the policy given at construction.
 
-        The policy is handed a single attempt as a callable, so it can bound
-        that attempt and start a fresh one; this class therefore cannot retry on
-        its own and cannot swallow a failure (`goal.md:141`).
+        The policy owns the attempts, so this class never retries or swallows.
 
         Args:
         url: The page to retrieve, already canonical.
@@ -144,18 +120,13 @@ class AiohttpWebPageFetcher(WebPageFetcher):
             async def attempt() -> str:
                 """Run one fetch, recording it whether it succeeds or not.
 
-                The record is emitted before the request is started, so an
-                attempt the policy abandons on its deadline is still visible in
-                the log (`goal.md:141`).
+                Recorded before the request starts, so a deadline is still logged.
 
                 Returns:
                 str: The decoded body of a 2xx response.
 
                 Raises:
-                NonRetryableError: For a non-2xx status. The site has
-                answered, so the policy must not spend a backoff on
-                it — a 503 from a site that refuses this client
-                included.
+                NonRetryableError: For a non-2xx status. The site has answered, so the policy must not spend a backoff on it, a 503 from a site that refuses this client included.
                 aiohttp.ClientError: For a transport failure, which is
                 transient and so is retried.
                 OSError: For a failure raised below the client.
@@ -167,6 +138,10 @@ class AiohttpWebPageFetcher(WebPageFetcher):
                 for middleware in self._middlewares:
                     middleware.apply(url, headers)
                 try:
+                    # Redirects are followed wherever the server sends them, so
+                    # a same-host page can lead off-host; the crawl scope is
+                    # stated over links, not server responses, so no handler
+                    # blocks them.
                     async with session.get(target, headers=headers) as response:
                         status = response.status
                         if not FIRST_SUCCESS_STATUS <= status < FIRST_FAILURE_STATUS:
@@ -188,7 +163,9 @@ class AiohttpWebPageFetcher(WebPageFetcher):
                 self._logger.info("fetched %s: %d characters", target, len(body))
                 return body
 
-            # Inside the session block: the policy runs every attempt against a
-            # session that is still open.
+            # The policy is handed one attempt as a callable, so it can bound
+            # that attempt and start a fresh one, inside the session block so
+            # every attempt sees an open session. Retry belongs to the caller:
+            # no counter and no sleep here, so the numbers stay in one place.
             return await self._retry_policy.execute(attempt)
 

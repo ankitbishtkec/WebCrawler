@@ -1,19 +1,8 @@
-"""Canonical URL value type (goal.md).
+"""Canonical URL value type.
 
-The standard library is the only URL implementation used, and `urlsplit` is
-the sole authority on what parses; this module only adds crawl-specific
-rejections on top of it.
-
-Canonical form is `scheme://hostname[:port] + path` plus a sorted query:
-- the fragment is dropped, because it is client-side only
-- an explicit port is preserved, because it selects a different server:
-  dropping it crawled `http://127.0.0.1:8731/` as port 80 and failed. Only
-  the scheme default (`http` 80, `https` 443) is dropped, so `http://h:80/x`
-  and `http://h/x` stay one identity while `http://h:8080/x` stays its own
-- duplicate query keys survive canonicalisation as distinct pairs in their
-  original relative order, because a repeated key is not redundant data
-- the scheme and the hostname arrive lowercased from the parser; the path and
-  the query values are stored verbatim, and the path is not defaulted to "/"
+Only the standard library is used and `urlsplit` is the sole authority on what parses; this
+module adds just the crawl-specific rejections. Canonical form is
+`scheme://hostname[:port] + path` plus a sorted query, lowercasing scheme and hostname only.
 """
 
 from urllib.parse import parse_qsl, urlencode, urlsplit
@@ -30,10 +19,9 @@ class InvalidURLError(ValueError):
 class CustomURL:
     """Immutable URL whose identity is its canonical form.
 
-    Stores the scheme, the hostname, the port, the path, and a sorted tuple
-    of query pairs; the fragment and a scheme-default port are discarded at
-    construction. Identity is therefore exactly scheme + hostname + port +
-    path + query string (goal.md).
+    Stores the scheme, the hostname, the port, the path, and a sorted tuple of query pairs;
+    the fragment and a scheme-default port are discarded at construction. Identity is
+    therefore exactly scheme + hostname + port + path + query string.
 
     Args:
         raw: An absolute `http` or `https` URL string.
@@ -76,7 +64,8 @@ class CustomURL:
         self._scheme = parts.scheme
         self._hostname = hostname
         # A scheme-default port names the same server as no port, so only a
-        # non-default one is kept: dropping it would crawl the wrong server.
+        # non-default one is kept: dropping it crawled http://127.0.0.1:8731/
+        # as port 80 and failed, while http://h:8080/x stays its own identity.
         default_port = 443 if parts.scheme == "https" else 80
         self._port = port if port is not None and port != default_port else None
         self._path = parts.path

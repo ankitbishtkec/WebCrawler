@@ -1,22 +1,8 @@
 """The URL state schema, the row mapping, and the one crawlable predicate.
 
-`goal.md:33-51` and `goal.md:76-91` state the same eligibility rule twice, and
-three methods have to agree on it exactly: the read-only select, the candidate
-claim, and the caller's-URL claim. It is encoded once here so those three cannot
-drift, and every statement the store issues is assembled in this module, so the
-repository holds transactions and no SQL.
-
-Three decisions are worth naming:
-
-- A timestamp is TEXT in SQLite's own `CURRENT_TIMESTAMP` format,
-  `%Y-%m-%d %H:%M:%S` UTC, so a column default and an application-written
-  value are byte-identical and order correctly as text (`goal.md:25`).
-- The claim needs `UPDATE... RETURNING`, which arrived in SQLite 3.35, so
-  `require_returning_support` refuses an older runtime rather than failing
-  later inside a claim.
-- `claim_urls` puts its `custom_url IN (...)` restriction inside the claiming
-  subquery, ahead of `ORDER BY` and `LIMIT`; in the outer `WHERE` it would
-  filter after the limit and silently under-fill the batch.
+The eligibility rule is encoded once here, so the read-only select, the
+candidate claim, and the caller's-URL claim cannot drift; the store holds
+transactions and no SQL.
 """
 
 import sqlite3
@@ -27,10 +13,14 @@ from typing import Final
 from webcrawler.domain.crawl_state import CrawlState
 from webcrawler.domain.custom_url import CustomURL
 
+# A timestamp is TEXT in SQLite's own `CURRENT_TIMESTAMP` format, UTC, so a
+# column default and an application-written value are byte-identical and order
+# correctly as text.
 TIMESTAMP_FORMAT: Final = "%Y-%m-%d %H:%M:%S"
 
 URLS_TABLE: Final = "urls"
 
+# The claim needs `UPDATE ... RETURNING`, which arrived in SQLite 3.35.
 MIN_RETURNING_VERSION: Final = (3, 35, 0)
 
 NO_LIMIT: Final = -1
@@ -69,8 +59,8 @@ MIGRATE_TIMES_CRAWLED_SQL: Final = f"""
 ALTER TABLE {URLS_TABLE} ADD COLUMN times_crawled INTEGER NOT NULL DEFAULT 0
 """
 
-# The index on `custom_url` goal.md:30 asks for is the primary key's own, so
-# only the composite index is declared.
+# An index on `custom_url` is the primary key's own, so only the composite
+# index is declared.
 CREATE_INDEX_SQL: Final = f"""CREATE INDEX IF NOT EXISTS {COMPOSITE_INDEX_NAME}
     ON {URLS_TABLE} (state, next_crawl_time, last_status_update_time)"""
 
@@ -109,25 +99,19 @@ def adapt_timestamp(moment: datetime) -> str:
     """Render an instant as the stored UTC text.
 
     Args:
-        moment: The instant to render. The port only ever passes a
-            timezone-aware UTC value (`goal.md:25`); a naive one would be read
-            as local time, which is why the port forbids it rather than this
-            function guessing.
+        moment: The instant to render; the port only ever passes a timezone-aware UTC value, since a naive one would be read as local time.
 
     Returns:
-        str: The instant in `TIMESTAMP_FORMAT`, truncated to whole seconds so
-            it stays byte-identical to SQLite's `CURRENT_TIMESTAMP`.
+        str: The instant in `TIMESTAMP_FORMAT`, truncated to whole seconds so it stays byte-identical to SQLite's `CURRENT_TIMESTAMP`.
     """
+    # No naive-value check here: that rule is the port's.
     return moment.astimezone(timezone.utc).strftime(TIMESTAMP_FORMAT)
 
 
 def register_timestamp_adapter() -> None:
     """Teach `sqlite3` to store a `datetime` as `TIMESTAMP_FORMAT` UTC text.
 
-    Idempotent, and called once at the bottom of this module, because a
-    `datetime` bound without it would be stored as `str(datetime)` — which
-    carries a `+00:00` offset and so no longer matches the column default's
-    `CURRENT_TIMESTAMP` byte for byte.
+    Idempotent, and called once at the bottom of this module: a `datetime` bound without it is stored as `str(datetime)`, whose `+00:00` offset no longer matches the column default's `CURRENT_TIMESTAMP` byte for byte.
     """
     sqlite3.register_adapter(datetime, adapt_timestamp)
 
@@ -135,17 +119,13 @@ def register_timestamp_adapter() -> None:
 def require_returning_support(version: Sequence[int] | None = None) -> None:
     """Refuse a SQLite too old for the claim query.
 
-    The claim is an `UPDATE ... RETURNING` (`goal.md:96`), added in SQLite
-    3.35. An older runtime is a deployment fault, so it is reported once at
-    `initialize` with the version it found rather than surfacing as a syntax
-    error inside the first claim.
+    The claim is an `UPDATE ... RETURNING`, added in SQLite 3.35, so an older runtime is a deployment fault reported once at `initialize` with the version found, not a syntax error inside the first claim.
 
     Args:
         version: The version to check, defaulting to the linked library's.
 
     Raises:
-        sqlite3.NotSupportedError: If the version predates 3.35. A
-            `sqlite3.Error` subclass, which is what the port documents.
+        sqlite3.NotSupportedError: If the version predates 3.35. A `sqlite3.Error` subclass, which is what the port documents.
     """
     current = tuple(version) if version is not None else sqlite3.sqlite_version_info
     if current[:3] < MIN_RETURNING_VERSION:
@@ -157,33 +137,25 @@ def require_returning_support(version: Sequence[int] | None = None) -> None:
 
 
 def crawlable_predicate(indent: str = "") -> str:
-    """Return the shared crawlability predicate of `goal.md:76-91`.
+    """Return the shared crawlability predicate.
 
-    All four branches live in one string, so `get_crawlable_urls`,
-    `claim_candidates`, and `claim_urls` cannot disagree about what is
-    eligible. The `CrawlState` values are interpolated here, so no state
-    literal is ever spelled by hand.
-
-    `not_crawled` carries no time predicate, matching `goal.md:78`. There is
-    no `next_crawl_time IS NOT NULL` guard either: `NULL <= :now` is never
-    true, so a null "no re-crawl" row cannot satisfy the `finished_crawl`
-    branch on its own, and the two in-flight branches never reference that
-    column, so a top-level guard would make an abandoned row unreclaimable.
+    All four branches live in one string, so `get_crawlable_urls`, `claim_candidates`, and `claim_urls` cannot disagree about what is eligible, and the `CrawlState` values are interpolated here, so no state literal is ever spelled by hand.
 
     Args:
-        indent: Text placed before every line but the first, so the shared
-            text nests legibly inside the claim's subquery. It changes
-            whitespace only, never the predicate.
+        indent: Text placed before every line but the first, so the shared text nests legibly inside the claim's subquery; it changes whitespace only, never the predicate.
 
     Returns:
-        str: A parenthesised SQL boolean expression, to be bound against the
-            named parameters `:now`, `:job_timeout`, and `:queue_timeout`.
+        str: A parenthesised SQL boolean expression, to be bound against the named parameters `:now`, `:job_timeout`, and `:queue_timeout`.
     """
     # The staleness branches compare epoch seconds, not text: SQLite's `-`
     # coerces '2026-09-26 11:28:00' to the year 2026.
     epoch_now = "CAST(strftime('%s', :now) AS INTEGER)"
     epoch_status = "CAST(strftime('%s', last_status_update_time) AS INTEGER)"
     body = (
+        # `not_crawled` carries no time predicate, and there is no
+        # `next_crawl_time IS NOT NULL` guard: `NULL <= :now` is never true, and
+        # the in-flight branches never read that column, so a top-level guard
+        # would make an abandoned row unreclaimable.
         f" state = '{CrawlState.NOT_CRAWLED.value}'",
         f" OR (state = '{CrawlState.FINISHED_CRAWL.value}'"
         " AND next_crawl_time <= :now)",
@@ -201,11 +173,7 @@ def crawlable_select_statement() -> str:
     """Return the read-only select over the shared predicate.
 
     Returns:
-        str: A `SELECT custom_url` ordered by `next_crawl_time` ascending and
-            bound against `:max_items`, where `-1` means no limit
-            (`goal.md:50-51`), plus the shared predicate's `:now`,
-            `:job_timeout`, and `:queue_timeout`, which the caller must bind
-            with the same encoder the claim uses.
+        str: A `SELECT custom_url` ordered by `next_crawl_time` ascending and bound against `:max_items`, where `-1` means no limit, plus the shared predicate's `:now`, `:job_timeout`, and `:queue_timeout`, which the caller must bind with the same encoder the claim uses.
     """
     return (
         f"SELECT custom_url\nFROM {URLS_TABLE}\n"
@@ -218,40 +186,32 @@ def crawlable_select_statement() -> str:
 def url_parameter_names(urls: Sequence[CustomURL]) -> tuple[str, ...]:
     """Name the bound parameters of a caller's `IN (...)` restriction.
 
-    The names carry no leading colon, because that is the form a `sqlite3`
-    mapping is keyed by; the claim text adds the colon back.
+    The names carry no leading colon, because that is the form a `sqlite3` mapping is keyed by; the claim text adds the colon back.
 
     Args:
-        urls: The caller's URLs. Non-empty; an empty list is short-circuited
-            by the repository before a statement is built, because `IN ()` is
-            rejected outright by some engines.
+        urls: The caller's URLs. Non-empty; an empty list is short-circuited by the repository before a statement is built, because `IN ()` is rejected outright by some engines.
 
     Returns:
-        tuple[str, ...]: The names `("u0", "u1", ...)`, ready to key the bound
-            values and to join into the claim text.
+        tuple[str, ...]: The names `("u0", "u1", ...)`, ready to key the bound values and to join into the claim text.
     """
     return tuple(f"u{index}" for index in range(len(urls)))
 
 
 def claim_statement(url_parameters: Sequence[str] | None = None) -> str:
-    """Return the atomic claim `UPDATE ... RETURNING` of `goal.md:67-98`.
+    """Return the atomic claim `UPDATE ... RETURNING`.
 
-    `BEGIN IMMEDIATE` takes the write lock up front, so the subquery and the
-    update cannot interleave with another connection's writer, and the claim
-    carries no outer `state NOT IN (...)` guard: that guard would permanently
-    exclude the two stale-recovery branches.
+    `BEGIN IMMEDIATE` takes the write lock up front, so the subquery and the update cannot interleave with another connection's writer, and the claim carries no outer `state NOT IN (...)` guard: that guard would permanently exclude the two stale-recovery branches.
 
     Args:
-        url_parameters: The `:uN` names of the caller's restriction, or None
-            to claim over every row.
+        url_parameters: The `:uN` names of the caller's restriction, or None to claim over every row.
 
     Returns:
-        str: The claim text, to be bound against `:claimed_state`, `:now`,
-            `:max_items`, `:job_timeout`, `:queue_timeout`, and one parameter
-            per URL when a restriction was given. The repository issues it
-            between an explicit `BEGIN IMMEDIATE` and `COMMIT`.
+        str: The claim text, to be bound against `:claimed_state`, `:now`, `:max_items`, `:job_timeout`, `:queue_timeout`, and one parameter per URL when a restriction was given. The repository issues it between an explicit `BEGIN IMMEDIATE` and `COMMIT`.
     """
     indent = " " * 10
+    # The caller's `custom_url IN (...)` restriction belongs inside the claiming
+    # subquery, ahead of `ORDER BY` and `LIMIT`; in the outer `WHERE` it would
+    # filter after the limit and silently under-fill the batch.
     restriction = (
         ""
         if url_parameters is None
@@ -275,9 +235,7 @@ def claim_statement(url_parameters: Sequence[str] | None = None) -> str:
 def row_to_custom_url(row: Sequence[str]) -> CustomURL:
     """Rebuild a `CustomURL` from a stored row.
 
-    Every projection this module issues is the single `custom_url` column, so
-    one string in, one value out; the URL is re-parsed rather than trusted,
-    which keeps the stored key and the in-memory identity the same type.
+    Every projection this module issues is the single `custom_url` column, so one string in, one value out; the URL is re-parsed rather than trusted, which keeps the stored key and the in-memory identity the same type.
 
     Args:
         row: One row of a `SELECT custom_url` or `RETURNING custom_url`.

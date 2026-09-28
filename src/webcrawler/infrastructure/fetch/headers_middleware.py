@@ -1,8 +1,7 @@
 """A middleware that merges configured headers into every request.
 
-Static request headers — a `User-Agent` override, an `Accept` policy, a
-tenant id — need no per-request logic, so the configured mapping is merged
-verbatim into each request's headers.
+Static request headers need no per-request logic, so the configured mapping is
+merged verbatim into each request's headers.
 """
 
 from collections.abc import Mapping
@@ -10,8 +9,19 @@ from collections.abc import Mapping
 from webcrawler.domain.custom_url import CustomURL
 from webcrawler.ports.request_middleware import RequestMiddleware
 
-# Static request headers — a `User-Agent` override, an `Accept` policy, a
-# tenant id — need no per-request logic.
+# Several sites answer a non-browser agent with 503, so the crawler presents as
+# a normal Chrome on Windows.
+DEFAULT_HEADERS: dict[str, str] = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/140.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
 class HeadersMiddleware(RequestMiddleware):
     """Merge a configured header mapping into every outgoing request.
 
@@ -20,9 +30,9 @@ class HeadersMiddleware(RequestMiddleware):
     merge happens at this middleware's position in the sequence.
 
     Args:
-    headers: The header names and values to set on every request, stored
-    as a private copy so later mutation of the mapping the caller
-    passed cannot change the middleware's behaviour.
+    headers: The header names and values to set on every request, stored as a
+    private copy so later mutation of the caller's mapping cannot change this
+    middleware's behaviour.
     """
 
     def __init__(self, headers: Mapping[str, str]) -> None:

@@ -1,19 +1,14 @@
 """HTML link extraction, through the standard library's parser.
 
-`goal.md:2` allows a library for HTML parsing while restricting the project to
-the standard library, so `html.parser.HTMLParser` is the parser and this module
-is the only place that knows about it. Only an `<a href>` is collected: a
-stylesheet or a canonical link names a resource rather than a page to crawl, and
-`<base href>` is a rebasing rule rather than a link to visit, so following it
-would drag the crawl outside the site it started on.
-
-`HTMLParser` reports what it reads through overridable callbacks and cannot be
-used without being a subclass; it appends to a caller-owned list, which is what
-`collect_hrefs` returns the very object the callbacks filled.
+The project is restricted to the standard library, so `html.parser.HTMLParser` is the
+parser and this module is the only place that knows about it. It must be subclassed to be
+used and it appends to a caller-owned list, which is the list `collect_hrefs` returns.
 """
 
 from html.parser import HTMLParser
 
+# Only an `<a href>` names a page to crawl: a stylesheet or a canonical link names a
+# resource, and `<base href>` is a rebasing rule whose following would drag the crawl off-site.
 ANCHOR_TAG: str = "a"
 HREF_ATTRIBUTE: str = "href"
 
@@ -21,13 +16,9 @@ HREF_ATTRIBUTE: str = "href"
 class HrefCollector(HTMLParser):
     """An HTML parser that appends each anchor's href to a caller's list.
 
-    A parser holds the state of the document it is reading, so one collector
-    serves one document: `collect_hrefs` builds a fresh collector per call
-    instead of resetting a shared one, which keeps it re-entrant.
-
-    The base is the standard library's parser rather than a port of our own;
-    the only alternative to overriding a callback would be a regular expression
-    over raw markup, and `goal.md:2` asks for a real parser.
+    A parser holds the state of the document it is reading, so one collector serves one document:
+    `collect_hrefs` builds a fresh collector per call instead of resetting a shared one, which keeps
+    it re-entrant. The base is the stdlib parser; a regex over raw markup is not an alternative.
 
     Args:
         hrefs: The caller's result list. It is filled in place, so the caller
@@ -46,10 +37,6 @@ class HrefCollector(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         """Record an opening anchor's href, and ignore every other tag.
 
-        A self-closing `<a href="..." />` needs no override of its own: the
-        inherited `handle_startendtag` delegates here, which is what the
-        standard parser already does.
-
         Args:
             tag: The tag name, already lowercased by the parser.
             attrs: The tag's attributes in document order, each a name and a
@@ -57,6 +44,8 @@ class HrefCollector(HTMLParser):
         """
         if tag != ANCHOR_TAG:
             return
+        # A self-closing `<a href="..." />` needs no override of its own: the inherited
+        # `handle_startendtag` delegates here, which is what the standard parser does.
         for name, value in attrs:
             if name == HREF_ATTRIBUTE and value is not None:
                 self._hrefs.append(value)
@@ -65,10 +54,7 @@ class HrefCollector(HTMLParser):
 def collect_hrefs(html: str) -> list[str]:
     """Return every anchor href in the markup, in document order.
 
-    Values come back exactly as the markup carried them: the parser unescaped
-    attribute values, and nothing here trims or resolves them, because deciding
-    what a link means and whether it is in scope belongs to the link extractor
-    (`goal.md:142`).
+    Values come back exactly as the markup carried them, the parser having unescaped them, and nothing here trims or resolves them: what a link means and whether it is in scope belongs to the link extractor.
 
     Args:
         html: The page body to read.

@@ -1,8 +1,8 @@
-"""The page-fetch port (goal.md:141).
+"""The page-fetch port.
 
-`goal.md:141` requires the fetch to go through an interface and to be given a
-retry policy, so the transport stays replaceable and the retry knobs live with
-the caller instead of being hard-coded per implementation.
+The fetch goes through an interface and is given a retry policy, so the
+transport stays replaceable and the retry knobs live with the caller instead of
+being hard-coded per implementation.
 """
 
 from abc import ABC, abstractmethod
@@ -17,8 +17,7 @@ class WebPageFetcher(ABC):
     async def fetch(self, url: CustomURL) -> str:
         """Return the response body for one URL.
 
-        The implementation retries its own transport, so the caller neither
-        wraps the call in a policy nor passes one (`goal.md:141`).
+        The implementation retries its own transport, so the caller neither wraps the call in a policy nor passes one.
 
         Args:
             url: The page to retrieve.
@@ -27,8 +26,5 @@ class WebPageFetcher(ABC):
             str: The decoded response body of a successful (2xx) response.
 
         Raises:
-            Exception: The last transport or status error, after the policy
-                has exhausted its attempts. A non-2xx status and a transport
-                failure are both raised rather than returned, so no caller
-                can mistake an error page for a page.
+            Exception: The last transport or status error, after the policy has exhausted its attempts. A non-2xx status and a transport failure are both raised rather than returned, so no caller can mistake an error page for a page.
         """
