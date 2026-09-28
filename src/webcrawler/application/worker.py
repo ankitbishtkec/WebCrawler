@@ -155,49 +155,15 @@ class CrawlerWorker:
             await self._reader.commit(batch)
             return
         # The rows complete_crawl inserted are already durable, so the next poll
-        # claims the ones this feed misses. Losing it costs no work, which is
-        # why a final failure is only a warning.
-        await self._try_queue_call(
-            lambda: self._queuer.enqueue_urls(discovered),
-            "queueing %d discovered url(s) failed, so the next poll claims them "
-            "from the store instead",
-            len(discovered),
-            level=logging.WARNING,
-        )
+        # claims the ones this feed misses. Both calls are unguarded: the
+        # shipped queue is in-memory and cannot raise, and enqueue_urls already
+        # logs a claim failure itself.
+        await self._queuer.enqueue_urls(discovered)
         # Best effort: parking is a fallback, so a failure to park is logged and
         # the rest are still parked. No retry, since the shipped producer cannot
         # fail and a networked one reports a full queue as False.
         await self._deadletter(failed)
-        # No retry policy here: commit is head-based, so re-issuing it would
-        # remove more than the batch owns. The port documents that a networked
-        # reader may raise, so the failure is caught and logged.
-        await self._try_queue_call(
-            lambda: self._reader.commit(batch),
-            "committing %d message(s) failed, so they stay on the queue and are "
-            "crawled again",
-            len(batch),
-        )
-
-    async def _try_queue_call(
-        self, call, template: str, count: int, level: int = logging.ERROR
-    ) -> None:
-        """Run one queue call, then log any failure at the given level.
-
-        No retry: each implementation retries its own I/O internally.
-
-        Args:
-        call: The coroutine function to run.
-        template: The failure message, with one %s for the error.
-        count: How many URLs the call covered, for the message.
-        level: The level to log a final failure at, ERROR by default.
-
-        Raises:
-        Exception: Nothing is raised
-        """
-        try:
-            await call()
-        except Exception as error:
-            self._logger.log(level, template + ": %s", count, error)
+        await self._reader.commit(batch)
 
     async def _mark_started(self, batch: list[BaseMessage], now: datetime) -> None:
         """Mark the whole batch started in one store call, and keep going.
