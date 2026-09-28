@@ -30,8 +30,7 @@ class CrawlerWorker:
     """Consumes the crawl queue one batch at a time, forever.
 
     `run` returns only on cancellation, since a crawl ends when the operator
-    interrupts it. One instant is read per batch and shared by every write, so a
-    batch cannot record two instants that disagree.
+    interrupts it.
     """
 
 

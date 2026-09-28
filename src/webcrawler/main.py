@@ -67,8 +67,11 @@ async def main() -> None:
     Exception: Whatever a collaborator raises outside the orchestrator's
     handled seed paths, propagated unchanged.
     """
-    # Logging first: everything that logs is constructed after it.
-    logger = configure_logging(level=logging.INFO)
+    # Logging first: everything that logs is constructed after it. `--debug`
+    # lowers the level only; a fetched url and its links stay at INFO either way.
+    logger = configure_logging(
+        level=logging.DEBUG if "--debug" in sys.argv[1:] else logging.INFO
+    )
     print(
         "Enter the seed URL to crawl, then press Ctrl+C at any time to "
         "stop."
