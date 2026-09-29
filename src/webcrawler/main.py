@@ -91,38 +91,51 @@ async def main() -> None:
     # One retry policy, two owners: the store and the fetches.
     retry_policy = ExponentialBackoffRetryPolicy(RETRY_SETTINGS)
     repository = SQLiteURLStateRepository(DB_FILE, retry_policy, time_provider)
-    await repository.initialize()
-    # The only source of request headers, applied in order; an auth middleware
-    # belongs here too (README's Extensions section).
-    request_middlewares: tuple[RequestMiddleware, ...] = (
-        HeadersMiddleware(DEFAULT_HEADERS),)
-    fetcher = AiohttpWebPageFetcher(
-        HTTP_CALL_TIMEOUT_SECONDS,
-        retry_policy,
-        middlewares=request_middlewares)
-    link_extractor = HtmlLinkExtractor()
-    # No wait is ever requested, so a crawl is not throttled; a delaying policy
-    # is an extension (README) and the worker already drives any of them.
-    politeness_policy = NoOpPolitenessPolicy()
-    poller = URLPoller(
-        repository,
-        producer,
-        job_timeout=JOB_TIMEOUT,
-        queue_timeout=QUEUE_TIMEOUT,
-        time_provider=time_provider)
-    worker = CrawlerWorker(
-        repository,
-        reader,
-        fetcher,
-        link_extractor,
-        politeness_policy,
-        poller,
-        producer=producer,
-        batch_size=BATCH_SIZE,
-        reschedule_delay=RESCHEDULE_DELAY,
-        time_provider=time_provider)
-    orchestrator = Orchestrator(repository, poller, worker, seed_line)
-    await orchestrator.run()
+    worker: CrawlerWorker | None = None
+    # This file builds what the run needs, so this is where they are released.
+    try:
+        await repository.initialize()
+        # The only source of request headers, applied in order; an auth middleware
+        # belongs here too (README's Extensions section).
+        request_middlewares: tuple[RequestMiddleware, ...] = (
+            HeadersMiddleware(DEFAULT_HEADERS),)
+        fetcher = AiohttpWebPageFetcher(
+            HTTP_CALL_TIMEOUT_SECONDS,
+            retry_policy,
+            middlewares=request_middlewares)
+        link_extractor = HtmlLinkExtractor()
+        # No wait is ever requested, so a crawl is not throttled; a delaying policy
+        # is an extension (README) and the worker already drives any of them.
+        politeness_policy = NoOpPolitenessPolicy()
+        poller = URLPoller(
+            repository,
+            producer,
+            job_timeout=JOB_TIMEOUT,
+            queue_timeout=QUEUE_TIMEOUT,
+            time_provider=time_provider)
+        worker = CrawlerWorker(
+            repository,
+            reader,
+            fetcher,
+            link_extractor,
+            politeness_policy,
+            poller,
+            producer=producer,
+            batch_size=BATCH_SIZE,
+            reschedule_delay=RESCHEDULE_DELAY,
+            time_provider=time_provider)
+        orchestrator = Orchestrator(repository, poller, worker, seed_line)
+        await orchestrator.run()
+    finally:
+        if worker is not None:
+            try:
+                await worker.close()
+            except Exception as error:
+                logger.error(
+                    "releasing the pooled http session failed, so it is left to "
+                    "the garbage collector: %s", error
+                )
+        await repository.close()
 
 
 if __name__ == "__main__":  # importing this module has no side effects
