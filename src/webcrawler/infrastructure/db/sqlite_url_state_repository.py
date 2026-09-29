@@ -69,8 +69,7 @@ def _epoch_seconds(moment: datetime) -> int:
     """
     return int(moment.timestamp())
 
-# The one class allowed to implement a port by inheritance, and nothing extends
-# it, which is what keeps the state machine substitutable.
+
 class SQLiteURLStateRepository(URLStateRepository):
     """Crawl state for every URL, held in one SQLite file.
 
@@ -310,7 +309,6 @@ class SQLiteURLStateRepository(URLStateRepository):
         parameters: Parameters = {
             "started_state": CrawlState.STARTED_CRAWL.value,
             "now": now,
-            "now_epoch": _epoch_seconds(now),
         }
         for name, url in zip(names, chunk):
             parameters[name] = url.get_url()

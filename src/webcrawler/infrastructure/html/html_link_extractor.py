@@ -6,7 +6,7 @@ Read the hrefs, build full URLs, and drop everything not on the page's own host.
 import logging
 from urllib.parse import urljoin
 
-from webcrawler.domain.custom_url import CustomURL, InvalidURLError
+from webcrawler.domain.custom_url import CustomURL
 from webcrawler.ports.link_extractor import LinkExtractor
 from webcrawler.utils.html_parser import collect_hrefs
 
@@ -74,6 +74,7 @@ class HtmlLinkExtractor(LinkExtractor):
             return None
         try:
             return CustomURL(urljoin(page_url, candidate))
-        except InvalidURLError as error:
+        except ValueError as error:
+            # Covers both `urljoin` (a malformed IPv6 authority) and `InvalidURLError`.
             self._logger.debug("skipping %r on %s: %s", candidate, page_url, error)
             return None

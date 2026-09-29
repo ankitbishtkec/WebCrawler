@@ -21,7 +21,8 @@ MIN_RETURNING_VERSION: Final = (3, 35, 0)
 
 NO_LIMIT: Final = -1
 
-# max bound parameters which can be used in sql statement
+# The variable limit was 999 before SQLite 3.32 and is 32766 after; `RETURNING`
+# already forces 3.35, so 999 is a deliberate wide margin, not the real ceiling.
 MAX_BOUND_PARAMETERS: Final = 999
 
 # `:claimed_state`, `:now`, and `:max_items` are bound by every chunk, so only
