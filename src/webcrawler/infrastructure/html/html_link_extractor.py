@@ -33,9 +33,8 @@ class HtmlLinkExtractor(LinkExtractor):
 
         Args:
             html: The page body to parse.
-            base_url: The URL the body was fetched from. It resolves the
-                relative hrefs and it names the one host in scope, which is why
-                a nested page resolves against itself and not against the seed.
+            base_url: The URL the body was fetched from. It is used for the
+                relative hrefs.
 
         Returns:
             list[CustomURL]: The in-scope links in first-seen order, with
@@ -47,6 +46,7 @@ class HtmlLinkExtractor(LinkExtractor):
         hrefs = collect_hrefs(html)
         # A dict keyed by CustomURL is a set that still remembers insertion
         # order, so dedupe and determinism come from one structure.
+        #ankit: use set instead of dict
         unique: dict[CustomURL, None] = {}
         for href in hrefs:
             target = self._to_url(href, page_url)
@@ -55,9 +55,6 @@ class HtmlLinkExtractor(LinkExtractor):
             # somebody else's site, so equality is the whole scope rule.
             if target is None or target.hostname != base_url.hostname:
                 continue
-            # A self-link is kept, not dropped: the store refuses to insert a URL
-            # it already holds, so hiding it would lose the fact that a page
-            # links to itself rather than remove a duplicate.
             unique.setdefault(target, None)
         links = list(unique)
         # DEBUG, and not higher, because the summary is routine: a page full of
@@ -83,8 +80,6 @@ class HtmlLinkExtractor(LinkExtractor):
             CustomURL | None: The resolved link, or None when it is not a
                 crawlable http(s) URL.
         """
-        # Skipped, not raised, so one bad link costs the page none of its others;
-        # logged at DEBUG because a page of `mailto:` hrefs is ordinary.
         candidate = href.strip()
         if not candidate:
             return None

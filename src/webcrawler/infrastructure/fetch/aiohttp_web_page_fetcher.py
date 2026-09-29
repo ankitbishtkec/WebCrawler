@@ -33,9 +33,7 @@ FIRST_FAILURE_STATUS: int = 300
 class AiohttpWebPageFetcher(WebPageFetcher):
     """Fetches one page per call through the native-async `aiohttp` client.
 
-    The class extends the `WebPageFetcher` ABC and is extended by nothing, which
-    is what keeps the worker's transport substitutable. An attempt logs at
-    DEBUG, a failure at ERROR, and a success at INFO.
+    The class extends the `WebPageFetcher` ABC.
     """
 
     def __init__(
@@ -84,10 +82,6 @@ class AiohttpWebPageFetcher(WebPageFetcher):
         context manager closes it, so the fetcher owns no session
         between calls.
         """
-        # The client awaits its sockets on the single event loop, so no thread
-        # bridge is started here. The session bounds the socket side, the retry
-        # policy the await side, so an attempt the policy abandons still ends on
-        # its own instead of holding a socket for ever.
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=self._timeout_seconds)
             ) as session:
@@ -105,16 +99,13 @@ class AiohttpWebPageFetcher(WebPageFetcher):
         str: The decoded body of a 2xx response.
 
         Raises:
-        aiohttp.ClientResponseError: If a response arrived with a non-2xx
-        status, once the policy has spent its attempts.
-        aiohttp.ClientError: For a transport failure raised by the client,
-        once the policy has spent its attempts.
-        OSError: For a DNS, socket, or timeout failure raised below the
-        client, once the policy has spent its attempts.
+        NonRetryableError: For a non-2xx status. The site has answered, so the policy must not spend a backoff on it, a 503 from a site that refuses this client included.
+        Exception: Possibly a aiohttp.ClientError: For a transport failure or OSError.
         """
         target = url.get_url()
         # One session per call keeps this stateless, so it needs no close; a
         # production crawler would reuse a long-lived one and own its lifecycle.
+        #ankit: do not create a new session for each fetch call. rather resuse same instance
         async with self._session_factory() as session:
 
             async def attempt() -> str:
@@ -127,23 +118,18 @@ class AiohttpWebPageFetcher(WebPageFetcher):
 
                 Raises:
                 NonRetryableError: For a non-2xx status. The site has answered, so the policy must not spend a backoff on it, a 503 from a site that refuses this client included.
-                aiohttp.ClientError: For a transport failure, which is
-                transient and so is retried.
-                OSError: For a failure raised below the client.
+                Exception: Possibly a aiohttp.ClientError: For a transport failure or OSError.
                 """
                 self._logger.debug("fetch attempt for %s", target)
-                # The built-in agent goes first so an unauthenticated crawl is
-                # still identified; a middleware may override it.
-                headers: dict[str, str] = {"User-Agent": DEFAULT_USER_AGENT}
+                headers: dict[str, str] = dict()
                 for middleware in self._middlewares:
                     middleware.apply(url, headers)
                 try:
                     # Redirects are followed wherever the server sends them, so
-                    # a same-host page can lead off-host; the crawl scope is
-                    # stated over links, not server responses, so no handler
-                    # blocks them.
+                    # a same-host page can lead off-host.
                     async with session.get(target, headers=headers) as response:
                         status = response.status
+                        #ankit:this is too simplistic. list codes which should be retried.
                         if not FIRST_SUCCESS_STATUS <= status < FIRST_FAILURE_STATUS:
                             raise NonRetryableError(
                                 url.get_url(),
@@ -160,12 +146,8 @@ class AiohttpWebPageFetcher(WebPageFetcher):
                         error,
                     )
                     raise
-                self._logger.info("fetched %s: %d characters", target, len(body))
+                self._logger.debug("fetched %s: %d characters", target, len(body))
                 return body
 
-            # The policy is handed one attempt as a callable, so it can bound
-            # that attempt and start a fresh one, inside the session block so
-            # every attempt sees an open session. Retry belongs to the caller:
-            # no counter and no sleep here, so the numbers stay in one place.
             return await self._retry_policy.execute(attempt)
 

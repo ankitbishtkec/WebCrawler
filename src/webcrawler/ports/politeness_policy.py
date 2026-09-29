@@ -10,7 +10,7 @@ from datetime import datetime
 from webcrawler.domain.base_result import BaseResult
 from webcrawler.domain.custom_url import CustomURL
 
-
+#ankit: both method should be async type as io operation can be done for these
 class PolitenessPolicy(ABC):
     """Decides how long a worker must wait before its next request.
 

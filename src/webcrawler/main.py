@@ -40,7 +40,7 @@ from webcrawler.utils.logger import configure_logging
 
 # The values a deployment overrides; each one is a constructor argument below.
 DB_FILE: str = "webcrawler.db"
-BATCH_SIZE: int = 30
+BATCH_SIZE: int = 50
 JOB_TIMEOUT: timedelta = timedelta(minutes=1)
 QUEUE_TIMEOUT: timedelta = timedelta(seconds=30)
 RESCHEDULE_DELAY: timedelta = timedelta(minutes=1)
@@ -51,7 +51,9 @@ RETRY_SETTINGS: RetrySettings = RetrySettings(
     base_delay_seconds=0.5,
     max_delay_seconds=8.0,
     jitter_seconds=0.5,
-    timeout_seconds=10.0)
+    timeout_seconds=12.0)
+#a bit lower timeout for http call is used compared to the task object timeout
+HTTP_CALL_TIMEOUT_SECONDS: int = RETRY_SETTINGS.timeout_seconds - 2.0
 # Several sites answer 503 to a non-browser agent, so the crawler presents as
 # a normal browser.
 async def main() -> None:
@@ -67,6 +69,9 @@ async def main() -> None:
     Exception: Whatever a collaborator raises outside the orchestrator's
     handled seed paths, propagated unchanged.
     """
+    #ankit: we should make a new logger with the class name in each class rather than passing it in constructor
+    #also the log level should be set. we can have a constant which can be referred for log level in all classes
+
     # Logging first: everything that logs is constructed after it. `--debug`
     # lowers the level only; a fetched url and its links stay at INFO either way.
     logger = configure_logging(
@@ -92,7 +97,7 @@ async def main() -> None:
     request_middlewares: tuple[RequestMiddleware, ...] = (
         HeadersMiddleware(DEFAULT_HEADERS),)
     fetcher = AiohttpWebPageFetcher(
-        RETRY_SETTINGS.timeout_seconds,
+        HTTP_CALL_TIMEOUT_SECONDS,
         logger,
         retry_policy,
         middlewares=request_middlewares)

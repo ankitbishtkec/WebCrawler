@@ -118,6 +118,7 @@ class InMemorySingleTopicSinglePartitionQueue:
             )
         self._deadletters.append(message)
 
+#ankit: remove if this code is not used
     def peek_deadletter(self, n: int) -> list[BaseMessage]:
         """Read the deadletter head without removing anything.
 
@@ -132,6 +133,7 @@ class InMemorySingleTopicSinglePartitionQueue:
             return []
         return list(islice(self._deadletters, n))
 
+#ankit: remove if this code is not used
     @property
     def deadletter_count(self) -> int:
         """int: How many messages are parked, without removing any."""
