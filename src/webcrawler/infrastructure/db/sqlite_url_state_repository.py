@@ -77,6 +77,10 @@ class SQLiteURLStateRepository(URLStateRepository):
 
     `initialize` asserts SQLite 3.35 or newer, because the claim query is an `UPDATE ... RETURNING` inside one `BEGIN IMMEDIATE`.
 
+    Note: there are possible race conditions with <operation apis>, close, _open and initialize. But I will let it be as this class's 
+    object is only "closed" when program is being shut. Even Initialize is called long before any <operation apis> are call
+    and any exception in it will kill the program.
+
     Args:
         db_path: The database file, or `":memory:"`. Its parent directory must already exist, because one process owns the whole crawler and so only ever opens the file itself.
         retry_policy: Applied to every unit of work, and the only holder of the backoff, jitter, and per-attempt timeout this store needs.
@@ -351,10 +355,6 @@ class SQLiteURLStateRepository(URLStateRepository):
             return
         self._closed = True
         await self._connection.close()
-        # aiosqlite stops its worker loop but joins nothing, and `_thread` is
-        # the only handle on it, so the join is done here.
-        if self._started:
-            self._connection._thread.join()
 
     async def _open(self) -> None:
         """Start the connection's worker thread once, on first use.
