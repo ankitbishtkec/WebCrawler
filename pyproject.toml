@@ -16,7 +16,6 @@ dev = ["pytest>=8", "pytest-asyncio>=0.24"]
 where = ["src"]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-testpaths = ["tests"]
-markers = ["smoke: fast end-to-end check, one per layer"]
