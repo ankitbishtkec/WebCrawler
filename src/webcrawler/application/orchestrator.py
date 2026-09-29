@@ -53,7 +53,7 @@ class Orchestrator:
         None: Always. A failed task is logged at ERROR and ends the session.
         """
         # `try/finally` so a Ctrl+C during the seed read still closes the store,
-        # which joins the aiosqlite thread, and so the store closes on every exit.
+        # which joins the aiosqlite thread, and so it closes on every exit.
         try:
             # Levels mark how far the seed got: DEBUG for none entered, WARNING
             # for one rejected as a URL, ERROR for one that could not be stored.
@@ -99,9 +99,22 @@ class Orchestrator:
                     "a crawl task failed, so the crawl is over: %s", error
                 )
         finally:
-            # The worker first, so the pooled session is released while the store
-            # is still open, and the store closes even if that close raises.
-            try:
-                await self._worker.close()
-            finally:
-                await self._repository.close()
+            await self._close_collaborators()
+
+    async def _close_collaborators(self) -> None:
+        """Release the worker and the store, on every exit of `run`.
+
+        The two closes are independent, and only the store's can hang a shutdown.
+        """
+        # A failing session close is logged, never raised, so the store below
+        # still closes and joins its aiosqlite thread.
+        try:
+            await self._worker.close()
+        except Exception as error:
+            self._logger.error(
+                "releasing the pooled http session failed, so it is left to "
+                "the garbage collector: %s", error
+            )
+        # Propagated, because a store that did not close is the one failure
+        # this method cannot absorb.
+        await self._repository.close()
