@@ -46,7 +46,7 @@ MAX_MARK_STARTED_URLS: Final = max(
 def _timeout_seconds(timeout: timedelta) -> int:
     """Encode one timeout the way the shared predicate compares it.
 
-    Staleness uses `strftime('%s', ...)` arithmetic, so a `timedelta` bound directly would compare as text.
+    The staleness branches subtract whole seconds from `:now_epoch`.
 
     Args:
         timeout: How long the caller allows before a row is reclaimable.
@@ -56,6 +56,18 @@ def _timeout_seconds(timeout: timedelta) -> int:
     """
     # The read and the claim both encode here, so a timeout cannot mean two things.
     return int(timeout.total_seconds())
+
+
+def _epoch_seconds(moment: datetime) -> int:
+    """Encode an instant as the epoch seconds the staleness cutoffs subtract from.
+
+    Args:
+        moment: The instant the predicates are evaluated against.
+
+    Returns:
+        int: Seconds since the Unix epoch, in UTC, matching `TIMESTAMP_FORMAT`.
+    """
+    return int(moment.timestamp())
 
 # The one class allowed to implement a port by inheritance, and nothing extends
 # it, which is what keeps the state machine substitutable.
@@ -297,6 +309,7 @@ class SQLiteURLStateRepository(URLStateRepository):
         parameters: Parameters = {
             "started_state": CrawlState.STARTED_CRAWL.value,
             "now": now,
+            "now_epoch": _epoch_seconds(now),
         }
         for name, url in zip(names, chunk):
             parameters[name] = url.get_url()
@@ -466,9 +479,10 @@ class SQLiteURLStateRepository(URLStateRepository):
         """
         parameters: Parameters = {
             "now": now,
+            "now_epoch": _epoch_seconds(now),
             "max_items": max_items,
-            "job_timeout": _timeout_seconds(job_timeout),
-            "queue_timeout": _timeout_seconds(queue_timeout),
+            "job_timeout_seconds": _timeout_seconds(job_timeout),
+            "queue_timeout_seconds": _timeout_seconds(queue_timeout),
         }
         async with self._connection.execute(
             models.crawlable_select_statement(), parameters
@@ -606,9 +620,10 @@ class SQLiteURLStateRepository(URLStateRepository):
         parameters: Parameters = {
             "claimed_state": CrawlState.QUEUED.value,
             "now": now,
+            "now_epoch": _epoch_seconds(now),
             "max_items": limit,
-            "job_timeout": _timeout_seconds(job_timeout),
-            "queue_timeout": _timeout_seconds(queue_timeout),
+            "job_timeout_seconds": _timeout_seconds(job_timeout),
+            "queue_timeout_seconds": _timeout_seconds(queue_timeout),
         }
         if chunk is not None:
             for name, url in zip(models.url_parameter_names(chunk), chunk):
@@ -637,6 +652,7 @@ class SQLiteURLStateRepository(URLStateRepository):
                         "finished_state": CrawlState.FINISHED_CRAWL.value,
                         "next_crawl_time": next_crawl_time,
                         "now": now,
+            "now_epoch": _epoch_seconds(now),
                     }
                     for url, next_crawl_time in finished
                 ],

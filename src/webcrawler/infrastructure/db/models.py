@@ -28,7 +28,9 @@ MAX_BOUND_PARAMETERS: Final = 999
 # the remainder of the budget is available for the `:uN` URL placeholders.
 CLAIM_RESERVED_PARAMETERS: Final = 3
 
-COMPOSITE_INDEX_NAME: Final = "idx_urls_state_times"
+NEXT_CRAWL_INDEX_NAME: Final = "idx_urls_state_next"
+
+STATUS_INDEX_NAME: Final = "idx_urls_state_status"
 
 PRIMARY_KEY_INDEX_NAME: Final = "sqlite_autoindex_urls_1"
 
@@ -48,14 +50,18 @@ CREATE_TABLE_SQL: Final = f"""CREATE TABLE IF NOT EXISTS {URLS_TABLE} (
     times_crawled           INTEGER NOT NULL DEFAULT 0
 )"""
 
-# An index on `custom_url` is the primary key's own, so only the composite
-# index is declared.
-CREATE_INDEX_SQL: Final = f"""CREATE INDEX IF NOT EXISTS {COMPOSITE_INDEX_NAME}
-    ON {URLS_TABLE} (state, next_crawl_time, last_status_update_time)"""
+# One index per predicate: an index on `custom_url` is the primary key's own, and
+# each claim filters on `state` plus one time column, so each gets its own.
+CREATE_NEXT_CRAWL_INDEX_SQL: Final = f"""CREATE INDEX IF NOT EXISTS {NEXT_CRAWL_INDEX_NAME}
+    ON {URLS_TABLE} (state, next_crawl_time)"""
+
+CREATE_STATUS_INDEX_SQL: Final = f"""CREATE INDEX IF NOT EXISTS {STATUS_INDEX_NAME}
+    ON {URLS_TABLE} (state, last_status_update_time)"""
 
 SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
     CREATE_TABLE_SQL,
-    CREATE_INDEX_SQL,
+    CREATE_NEXT_CRAWL_INDEX_SQL,
+    CREATE_STATUS_INDEX_SQL,
 )
 
 INSERT_URL_SQL: Final = f"""
@@ -136,10 +142,12 @@ def crawlable_predicate(indent: str = "") -> str:
     Returns:
         str: A parenthesised SQL boolean expression, to be bound against the named parameters `:now`, `:job_timeout`, and `:queue_timeout`.
     """
-    # The staleness branches compare epoch seconds, not text: SQLite's `-`
-    # coerces '2026-09-26 11:28:00' to the year 2026.
-    epoch_now = "CAST(strftime('%s', :now) AS INTEGER)"
-    epoch_status = "CAST(strftime('%s', last_status_update_time) AS INTEGER)"
+    # The staleness branches compare the column bare, against a cutoff the
+    # parameter side computed: wrapping `last_status_update_time` in strftime()
+    # would hide it from idx_urls_state_status. Timestamps are TIMESTAMP_FORMAT
+    # text, so a plain <= sorts correctly, and datetime(..., 'unixepoch') emits
+    # that same format.
+    cutoff = "datetime(:now_epoch - :{name}_seconds, 'unixepoch')"
     body = (
         # `not_crawled` carries no time predicate, and there is no
         # `next_crawl_time IS NOT NULL` guard: `NULL <= :now` is never true, and
@@ -149,11 +157,9 @@ def crawlable_predicate(indent: str = "") -> str:
         f" OR (state = '{CrawlState.FINISHED_CRAWL.value}'"
         " AND next_crawl_time <= :now)",
         f" OR (state = '{CrawlState.STARTED_CRAWL.value}'",
-        f" AND {epoch_now}",
-        f" - {epoch_status} >= :job_timeout)",
+        f" AND last_status_update_time <= {cutoff.format(name='job_timeout')})",
         f" OR (state = '{CrawlState.QUEUED.value}'",
-        f" AND {epoch_now}",
-        f" - {epoch_status} >= :queue_timeout)",
+        f" AND last_status_update_time <= {cutoff.format(name='queue_timeout')})",
     )
     return ("\n" + indent).join(("(", *body, ")"))
 
