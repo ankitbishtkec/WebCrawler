@@ -22,7 +22,7 @@ class HtmlLinkExtractor(LinkExtractor):
         """Hold nothing; nothing is parsed until `extract` is called."""
         self._logger = logging.getLogger(__name__)
 
-    def extract(self, html: str, base_url: CustomURL) -> list[CustomURL]:
+    def extract(self, html: str, base_url: CustomURL) -> set[CustomURL]:
         """Return the page's unique in-scope links, resolved against the page.
 
         `CustomURL` hashing collapses duplicates and fragments.
@@ -32,13 +32,12 @@ class HtmlLinkExtractor(LinkExtractor):
             base_url: The URL the body was fetched from, used to resolve relative hrefs.
 
         Returns:
-            list[CustomURL]: The in-scope links, duplicates collapsed and fragments already dropped, in no promised order.
+            set[CustomURL]: The unique in-scope links, unordered, with fragments already dropped.
 
         Synchronous: pure CPU parsing, no I/O.
         """
         page_url = base_url.get_url()
         hrefs = collect_hrefs(html)
-        # A set dedupes and no longer fixes an order, so the links are unordered.
         unique: set[CustomURL] = set()
         for href in hrefs:
             target = self._to_url(href, page_url)
@@ -48,16 +47,15 @@ class HtmlLinkExtractor(LinkExtractor):
             if target is None or target.hostname != base_url.hostname:
                 continue
             unique.add(target)
-        links = list(unique)
         # DEBUG, and not higher, because the summary is routine: a page full of
         # `mailto:` hrefs is ordinary rather than an error.
         self._logger.debug(
             "extracted %d same-host link(s) from %d href(s) on %s",
-            len(links),
+            len(unique),
             len(hrefs),
             page_url,
         )
-        return links
+        return unique
 
     def _to_url(self, href: str, page_url: str) -> CustomURL | None:
         """Resolve one href against the page and parse the result.
@@ -69,8 +67,7 @@ class HtmlLinkExtractor(LinkExtractor):
             page_url: The canonical URL of the page the href was read from.
 
         Returns:
-            CustomURL | None: The resolved link, or None when it is not a
-                crawlable http(s) URL.
+            CustomURL | None: The resolved link, or None when it is not a crawlable http(s) URL.
         """
         candidate = href.strip()
         if not candidate:

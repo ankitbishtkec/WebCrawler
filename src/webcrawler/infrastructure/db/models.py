@@ -168,7 +168,7 @@ def crawlable_select_statement() -> str:
     """Return the read-only select over the shared predicate.
 
     Returns:
-        str: A `SELECT custom_url` ordered by `next_crawl_time` ascending and bound against `:max_items`, where `-1` means no limit, plus the shared predicate's `:now`, `:job_timeout`, and `:queue_timeout`, which the caller must bind with the same encoder the claim uses.
+        str: A `SELECT custom_url` that orders by `next_crawl_time` ascending so the limit keeps the earliest rows, bound against `:max_items`, where `-1` means no limit, plus the shared predicate's `:now`, `:job_timeout`, and `:queue_timeout`, which the caller must bind with the same encoder the claim uses. The caller maps the rows to a set, so that ordering is not observable.
     """
     return (
         f"SELECT custom_url\nFROM {URLS_TABLE}\n"
@@ -184,7 +184,7 @@ def url_parameter_names(urls: Sequence[CustomURL]) -> tuple[str, ...]:
     The names carry no leading colon, because that is the form a `sqlite3` mapping is keyed by; the claim text adds the colon back.
 
     Args:
-        urls: The caller's URLs. Non-empty; an empty list is short-circuited by the repository before a statement is built, because `IN ()` is rejected outright by some engines.
+        urls: The caller's URLs. Non-empty; an empty collection is short-circuited by the repository before a statement is built, because `IN ()` is rejected outright by some engines.
 
     Returns:
         tuple[str, ...]: The names `("u0", "u1", ...)`, ready to key the bound values and to join into the claim text.

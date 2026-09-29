@@ -71,7 +71,7 @@ class Orchestrator:
             )
             return
         try:
-            await self._repository.create_urls([seed])
+            await self._repository.create_urls({seed})
             await self._poller.enqueue_urls([seed])
         except Exception as error:
             self._logger.error(

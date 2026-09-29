@@ -14,7 +14,7 @@ class LinkExtractor(ABC):
     """Finds the next crawl targets in one page body."""
 
     @abstractmethod
-    def extract(self, html: str, base_url: CustomURL) -> list[CustomURL]:
+    def extract(self, html: str, base_url: CustomURL) -> set[CustomURL]:
         """Return the unique same-host links found in a page body.
 
         Relative hrefs resolve against `base_url`, the page just fetched and not the seed, so a nested relative link resolves as a browser would. Off-host links are dropped here, the one place the exact-hostname scope is applied.
@@ -24,10 +24,10 @@ class LinkExtractor(ABC):
             base_url: The URL the body came from, used to resolve relative hrefs and to decide which host is in scope.
 
         Returns:
-            list[CustomURL]: The unique in-scope links in first-seen order, duplicates collapsed and fragments already dropped by `CustomURL`.
+            set[CustomURL]: The unique in-scope links, unordered, with fragments already dropped by `CustomURL`.
 
         Raises:
-            Exception: A malformed body may defeat an implementation's parser, so one may raise; the worker treats that as one failed URL.
+            Exception: If the body cannot be parsed; the worker treats that as one failed URL.
 
         Synchronous: pure CPU parsing, no I/O.
         """

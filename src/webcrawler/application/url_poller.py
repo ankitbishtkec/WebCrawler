@@ -102,8 +102,8 @@ class URLPoller(CrawlQueuer):
                 an id is a genuinely new request, not a repeat.
             now: The instant the claim's predicates are evaluated against.
             urls: The caller's own URLs, or None to claim candidates. A
-                caller's list is already the batch, so `enqueue_urls` passes
-                it with no limit.
+                caller's list is already the batch, so `enqueue_urls` passes it
+                with no limit, and a URL repeated in it is claimed once.
             max_items: The claim's row limit, already resolved by the
                 caller, which is why this takes a plain `int` and not
                 `int | None`; `-1` means no limit.
@@ -129,7 +129,7 @@ class URLPoller(CrawlQueuer):
                 )
             else:
                 rows = await self._repository.claim_urls(
-                    urls,
+                    set(urls),
                     now,
                     max_items,
                     job_timeout=self._job_timeout,
@@ -148,7 +148,10 @@ class URLPoller(CrawlQueuer):
             return
         # partition_key is hash(url), stored verbatim: a negative key already
         # routes non-negatively under the producer's modulo. One bulk call per
-        # poll, issued even for an empty claim, so one path serves both.
+        # poll, issued even for an empty claim, so one path serves both. The
+        # claim returns a set, so its SQL order is already discarded here; the
+        # messages and their results are zipped by position, so each result is
+        # still its own URL's.
         results = await self._producer.enqueue_many(
             [BaseMessage(url, partition_key=hash(url)) for url in rows],
             request_id,
@@ -177,7 +180,8 @@ class URLPoller(CrawlQueuer):
 
         Args:
             urls: The URLs to queue, expected to exist as rows already, which
-                is why this claims and never inserts.
+                is why this claims and never inserts. A URL listed twice is
+                claimed and queued once.
             request_id: The id handed to the bulk feed, or None to mint a
                 fresh one inside.
 

@@ -21,9 +21,9 @@ from webcrawler.ports.topic_reader import TopicReader
 from webcrawler.ports.url_state_repository import URLStateRepository
 from webcrawler.ports.web_page_fetcher import WebPageFetcher
 
-# One URL's outcome pair, the links its body revealed, and whether it was
-# crawled; a False third element is what makes the caller deadletter it.
-_CrawlResult = tuple[tuple[CustomURL, datetime | None], list[CustomURL], bool]
+# One URL's outcome pair, the unique links its body revealed, and whether it
+# was crawled; a False third element is what makes the caller deadletter it.
+_CrawlResult = tuple[tuple[CustomURL, datetime | None], set[CustomURL], bool]
 
 
 class CrawlerWorker:
@@ -108,7 +108,10 @@ class CrawlerWorker:
     async def _process_batch(self, batch: list[BaseMessage]) -> None:
         """Crawl one batch concurrently, then record, queue, park, and commit it.
 
-        One `now` is read before the task group opens and shared by every write.
+        One `now` is shared by every write, and a URL named twice merges to one.
+
+        Args:
+        batch: The peeked messages this iteration owns, in the queue's order.
 
         Raises:
         Exception: Nothing is raised
@@ -123,15 +126,24 @@ class CrawlerWorker:
             crawls = [
                 group.create_task(self._crawl_one(item.url, now)) for item in batch
             ]
-        # Collected here so the tasks share no mutable state and batch order is
-        # kept.
-        outcomes: list[tuple[CustomURL, datetime | None]] = []
-        discovered: list[CustomURL] = []
+        # Collected here so the tasks share no mutable state. `outcomes` is keyed
+        # by URL and `discovered` is a set, so neither keeps the batch's order.
+        outcomes: dict[CustomURL, datetime | None] = {}
+        discovered: set[CustomURL] = set()
         failed: list[BaseMessage] = []
         for item, crawl in zip(batch, crawls):
-            outcome, links, is_success = crawl.result()
-            outcomes.append(outcome)
-            discovered.extend(links)
+            (url, next_crawl_time), links, is_success = crawl.result()
+            # One entry per URL, so the store writes its row once per batch and
+            # never picks between two outcomes itself. An unseen URL and a
+            # stored None both take the incoming value, which is why one
+            # `None` never displaces a real instant; two real instants then
+            # collapse to the later one.
+            known = outcomes.get(url)
+            if known is None:
+                outcomes[url] = next_crawl_time
+            elif next_crawl_time is not None and next_crawl_time > known:
+                outcomes[url] = next_crawl_time
+            discovered.update(links)
             if not is_success:
                 failed.append(item)
         # `complete_crawl` comes first because `enqueue_urls` claims the rows it
@@ -156,10 +168,11 @@ class CrawlerWorker:
             await self._reader.commit(batch)
             return
         # The rows complete_crawl inserted are already durable, so the next poll
-        # claims the ones this feed misses. Both calls are unguarded: the
-        # shipped queue is in-memory and cannot raise, and enqueue_urls already
-        # logs a claim failure itself.
-        await self._queuer.enqueue_urls(discovered)
+        # claims the ones this feed misses. `enqueue_urls` takes a list, so the
+        # set is materialised here and deduplicated again by that claim. Both
+        # calls are unguarded: the shipped queue is in-memory and cannot raise,
+        # and enqueue_urls already logs a claim failure itself.
+        await self._queuer.enqueue_urls(list(discovered))
         # Best effort: parking is a fallback, so a failure to park is logged and
         # the rest are still parked. No retry, since the shipped producer cannot
         # fail and a networked one reports a full queue as False.
@@ -172,14 +185,14 @@ class CrawlerWorker:
         A failure leaves the rows claimable, for the timeout branches to reconcile.
 
         Args:
-        batch: The messages this iteration owns, whose URLs are all marked.
+        batch: The messages this iteration owns, whose distinct URLs are all marked.
         now: The batch's single instant, the attempt time.
 
         Raises:
         Exception: Nothing is raised
         """
         try:
-            await self._repository.mark_started([item.url for item in batch], now)
+            await self._repository.mark_started({item.url for item in batch}, now)
         except Exception as error:
             self._logger.error(
                 "marking %d url(s) started at %s failed, so their rows stay "
@@ -229,9 +242,9 @@ class CrawlerWorker:
 
         Returns:
         _CrawlResult: The outcome to record, None scheduling no re-crawl; the
-        same-host links the body revealed; and whether the URL was crawled. A
-        deferral and a success yield True, a failure yields no links and False,
-        which is what makes the caller deadletter the message.
+        unique same-host links the body revealed; and whether the URL was
+        crawled. A deferral and a success yield True, a failure yields no links
+        and False, which is what makes the caller deadletter the message.
 
         Raises:
         Exception: Nothing is raised
@@ -241,7 +254,7 @@ class CrawlerWorker:
         try:
             wait_ms = await self._politeness_policy.before_fetch(url)
             if wait_ms > 0:
-                return (url, now + timedelta(milliseconds=wait_ms)), [], True
+                return (url, now + timedelta(milliseconds=wait_ms)), set(), True
             is_success = False
             try:
                 html = await self._fetcher.fetch(url)
@@ -263,7 +276,7 @@ class CrawlerWorker:
                     now, url, BaseResult(is_success=is_success)
                 )
             if not is_success:
-                return (url, now + self._reschedule_delay), [], False
+                return (url, now + self._reschedule_delay), set(), False
             links = self._link_extractor.extract(html, url)
             # INFO, the crawl's own output: the visited page and the links it led to.
             self._logger.info(
@@ -288,4 +301,4 @@ class CrawlerWorker:
                 self._reschedule_delay,
                 error,
             )
-            return (url, now + self._reschedule_delay), [], False
+            return (url, now + self._reschedule_delay), set(), False

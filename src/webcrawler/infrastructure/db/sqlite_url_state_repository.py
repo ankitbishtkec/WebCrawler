@@ -9,7 +9,7 @@ import asyncio
 import contextlib
 import logging
 import sqlite3
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Final, TypeVar
@@ -120,13 +120,13 @@ class SQLiteURLStateRepository(URLStateRepository):
         await self._open()
         await self._transaction(self._create_schema)
 
-    async def create_urls(self, urls: list[CustomURL]) -> None:
+    async def create_urls(self, urls: set[CustomURL]) -> None:
         """Insert the given URLs, ignoring any that already exist.
 
-        An insert is the only way a row becomes `not_crawled`, and it sets `created_time` and `next_crawl_time` to the same injected instant, so a fresh row is immediately claimable. An empty list is a no-op that issues no statement.
+        An insert is the only way a row becomes `not_crawled`, and it sets `created_time` and `next_crawl_time` to the same injected instant, so a fresh row is immediately claimable. An empty set is a no-op that issues no statement.
 
         Args:
-            urls: The canonical URLs to make known to the crawler.
+            urls: The unique canonical URLs to make known to the crawler.
 
         Raises:
             sqlite3.Error: If the batch cannot be committed, in which case no row is inserted.
@@ -156,7 +156,7 @@ class SQLiteURLStateRepository(URLStateRepository):
         *,
         job_timeout: timedelta,
         queue_timeout: timedelta,
-    ) -> list[CustomURL]:
+    ) -> set[CustomURL]:
         """Read the rows a claim would select, changing nothing.
 
         The timeouts are bound, not defaulted, because an in-flight row is eligible only once its own timeout has elapsed, and the statement and its parameters are built by the same helpers the claim uses, so the two cannot drift apart.
@@ -168,7 +168,7 @@ class SQLiteURLStateRepository(URLStateRepository):
             queue_timeout: How long a `queued` row may wait before it is reported as reclaimable.
 
         Returns:
-            list[CustomURL]: Up to `max_items` eligible URLs, earliest `next_crawl_time` first.
+            set[CustomURL]: Up to `max_items` unique eligible URLs, unordered.
 
         Raises:
             sqlite3.Error: If the query cannot be executed.
@@ -187,7 +187,7 @@ class SQLiteURLStateRepository(URLStateRepository):
         *,
         job_timeout: timedelta,
         queue_timeout: timedelta,
-    ) -> list[CustomURL]:
+    ) -> set[CustomURL]:
         """Atomically move eligible rows to `queued` and return them.
 
         No lock guards the state transition: the predicate re-targets a `queued` or `started_crawl` row only once it is older than its timeout, and `BEGIN IMMEDIATE` keeps another writer out of the select-then-update pair.
@@ -199,7 +199,7 @@ class SQLiteURLStateRepository(URLStateRepository):
             queue_timeout: How long a `queued` row may wait before it is re-claimed, which is how a lost queue send is recovered.
 
         Returns:
-            list[CustomURL]: Only the rows this call moved to `queued`, so the caller never enqueues a row somebody else already owns.
+            set[CustomURL]: The unique rows this call moved to `queued`, unordered, so the caller never enqueues a row somebody else already owns.
 
         Raises:
             sqlite3.Error: If the transaction cannot be committed, in which case it is rolled back and no row is claimed.
@@ -208,41 +208,41 @@ class SQLiteURLStateRepository(URLStateRepository):
 
     async def claim_urls(
         self,
-        urls: list[CustomURL],
+        urls: set[CustomURL],
         now: datetime,
         max_items: int = -1,
         *,
         job_timeout: timedelta,
         queue_timeout: timedelta,
-    ) -> list[CustomURL]:
+    ) -> set[CustomURL]:
         """As `claim_candidates`, restricted to the caller's own URLs.
 
-        The `custom_url IN (...)` restriction is applied inside the claiming subquery, ahead of the `LIMIT`, so a batch is never under-filled with rows the caller did not ask for. An empty list issues no statement at all, because the no-links case is the common one and `IN ()` is rejected outright by some engines.
+        The `custom_url IN (...)` restriction is applied inside the claiming subquery, ahead of the `LIMIT`, so a batch is never under-filled with rows the caller did not ask for. An empty set issues no statement at all, because the no-links case is the common one and `IN ()` is rejected outright by some engines.
 
         Args:
-            urls: The URLs the caller wants queued, expected to exist already, which is why this claims and never inserts.
+            urls: The unique URLs the caller wants queued, expected to exist already, which is why this claims and never inserts.
             now: The instant the predicates are evaluated against, in UTC.
-            max_items: The row limit. `-1` means no limit, and is the default because the caller's list is already the batch.
+            max_items: The row limit. `-1` means no limit, and is the default because the caller's set is already the batch.
             job_timeout: How long a `started_crawl` row may stay untouched before it is treated as abandoned and reclaimed.
             queue_timeout: How long a `queued` row may wait before it is re-claimed.
 
         Returns:
-            list[CustomURL]: The subset of `urls` this call moved to `queued`, empty for a missing or a freshly queued URL.
+            set[CustomURL]: The unique claimed rows among `urls`, unordered, and empty for a missing or a freshly queued URL.
 
         Raises:
             sqlite3.Error: If the transaction cannot be committed, in which case it is rolled back and no row is claimed.
         """
         if not urls:
-            return []
+            return set()
         return await self._claim(urls, now, max_items, job_timeout, queue_timeout)
 
-    async def mark_started(self, urls: list[CustomURL], now: datetime) -> None:
+    async def mark_started(self, urls: set[CustomURL], now: datetime) -> None:
         """Record that workers have begun crawling the given URLs.
 
-        This is the only writer of `last_crawl_time`, deliberately overriding the older plan that put it in the completion transaction, because it records the attempt rather than the outcome. The rows stay claimable while the attempts run: a worker that dies before writing a completion leaves them `started_crawl`, and the `job_timeout` branch reclaims them. One `UPDATE ... WHERE custom_url IN (...)` covers a whole batch, and an empty list is a no-op that issues no statement, because `IN ()` is rejected outright by some engines.
+        This is the only writer of `last_crawl_time`, deliberately overriding the older plan that put it in the completion transaction, because it records the attempt rather than the outcome. The rows stay claimable while the attempts run: a worker that dies before writing a completion leaves them `started_crawl`, and the `job_timeout` branch reclaims them. One `UPDATE ... WHERE custom_url IN (...)` covers a whole batch, and an empty set is a no-op that issues no statement, because `IN ()` is rejected outright by some engines.
 
         Args:
-            urls: The URLs being crawled, all of which the store already holds.
+            urls: The unique URLs being crawled, all of which the store already holds.
             now: The attempt time, in UTC.
 
         Raises:
@@ -254,9 +254,9 @@ class SQLiteURLStateRepository(URLStateRepository):
         await self._transaction(lambda: self._mark_started_chunks(urls, now))
 
     async def _mark_started_chunks(
-        self, urls: Sequence[CustomURL], now: datetime
+        self, urls: Collection[CustomURL], now: datetime
     ) -> None:
-        """Mark every chunk of the caller's list inside the open transaction.
+        """Mark every chunk of the caller's set inside the open transaction.
 
         All chunks share one `BEGIN IMMEDIATE` ... `COMMIT`, so a chunked batch is as atomic as a single-statement one.
 
@@ -273,21 +273,22 @@ class SQLiteURLStateRepository(URLStateRepository):
         )
 
     def _mark_started_chunks_of(
-        self, urls: Sequence[CustomURL]
-    ) -> list[Sequence[CustomURL]]:
+        self, urls: Collection[CustomURL]
+    ) -> list[tuple[CustomURL, ...]]:
         """Split the caller's URLs into statement-sized chunks.
 
-        One statement cannot bind more placeholders than SQLite allows parameters, so a long caller list becomes several statements, the same way the claim chunks its list.
+        One statement cannot bind more placeholders than SQLite allows parameters, so a long caller set becomes several statements, the same way the claim chunks its set. The set is materialised into a tuple because a set is not sliceable, and no order is promised or needed.
 
         Args:
             urls: The caller's URLs, non-empty.
 
         Returns:
-            list[Sequence[CustomURL]]: One entry per statement to issue.
+            list[tuple[CustomURL, ...]]: One entry per statement to issue.
         """
+        pending = tuple(urls)
         return [
-            urls[start : start + MAX_MARK_STARTED_URLS]
-            for start in range(0, len(urls), MAX_MARK_STARTED_URLS)
+            pending[start : start + MAX_MARK_STARTED_URLS]
+            for start in range(0, len(pending), MAX_MARK_STARTED_URLS)
         ]
 
     def _mark_started_statement(
@@ -317,17 +318,17 @@ class SQLiteURLStateRepository(URLStateRepository):
 
     async def complete_crawl(
         self,
-        finished: list[tuple[CustomURL, datetime | None]],
-        discovered: list[CustomURL],
+        finished: dict[CustomURL, datetime | None],
+        discovered: set[CustomURL],
         now: datetime,
     ) -> None:
         """Write one batch of outcomes and one batch of discoveries atomically.
 
-        One bulk transaction, so a batch either lands whole or not at all, which is what lets the worker treat a failure here as an abort rather than a partial success. Two empty lists are a no-op that issues no statement.
+        One transaction; a URL both finished and discovered is written once.
 
         Args:
-            finished: One `(url, next_crawl_time)` pair per attempted URL. A `None` time stores NULL and schedules no re-crawl, and every row in the call also gets `last_status_update_time = now`.
-            discovered: URLs found on the crawled pages, inserted when absent with `created_time = next_crawl_time`; a row that already exists is left untouched, so a re-crawl never resets another's schedule.
+            finished: Each attempted URL mapped to the instant it becomes due again, or None for no re-crawl, unique by URL. A `None` time stores NULL and schedules no re-crawl, and every row in the call also gets `last_status_update_time = now`.
+            discovered: The unique URLs found on the crawled pages, inserted when absent with `created_time = next_crawl_time`; a row that already exists is left untouched, so a re-crawl never resets another's schedule.
             now: The completion time, in UTC.
 
         Raises:
@@ -465,7 +466,7 @@ class SQLiteURLStateRepository(URLStateRepository):
         max_items: int,
         job_timeout: timedelta,
         queue_timeout: timedelta,
-    ) -> list[CustomURL]:
+    ) -> set[CustomURL]:
         """Run the read-only select and map its rows.
 
         Args:
@@ -475,7 +476,7 @@ class SQLiteURLStateRepository(URLStateRepository):
             queue_timeout: How long a `queued` row may wait before it is reported as reclaimable.
 
         Returns:
-            list[CustomURL]: The eligible URLs, earliest `next_crawl_time` first.
+            set[CustomURL]: The unique eligible URLs, unordered, so the statement's own earliest-first ordering is dropped here.
         """
         parameters: Parameters = {
             "now": now,
@@ -488,17 +489,17 @@ class SQLiteURLStateRepository(URLStateRepository):
             models.crawlable_select_statement(), parameters
         ) as cursor:
             rows = await cursor.fetchall()
-            return [models.row_to_custom_url(row) for row in rows]
+            return {models.row_to_custom_url(row) for row in rows}
 
     async def _claim(
         self,
-        urls: Sequence[CustomURL] | None,
+        urls: Collection[CustomURL] | None,
         now: datetime,
         max_items: int,
         job_timeout: timedelta,
         queue_timeout: timedelta,
-    ) -> list[CustomURL]:
-        """Claim inside one transaction, chunking a caller's URL list if needed.
+    ) -> set[CustomURL]:
+        """Claim inside one transaction, chunking a caller's URL set if needed.
 
         Args:
             urls: The caller's URLs, or None to consider every row.
@@ -508,13 +509,13 @@ class SQLiteURLStateRepository(URLStateRepository):
             queue_timeout: How long a `queued` row may wait before it is re-claimed.
 
         Returns:
-            list[CustomURL]: Only the rows this call moved to `queued`.
+            set[CustomURL]: The unique rows this call moved to `queued`, unordered.
 
         Raises:
             sqlite3.Error: If the transaction cannot be committed, in which case it is rolled back and no row is claimed.
         """
         if urls is not None and not urls:
-            return []
+            return set()
         await self._open()
         return await self._transaction(
             lambda: self._run_claim_chunks(
@@ -524,13 +525,13 @@ class SQLiteURLStateRepository(URLStateRepository):
 
     async def _run_claim_chunks(
         self,
-        urls: Sequence[CustomURL] | None,
+        urls: Collection[CustomURL] | None,
         now: datetime,
         max_items: int,
         job_timeout: timedelta,
         queue_timeout: timedelta,
-    ) -> list[CustomURL]:
-        """Claim every chunk of the caller's list inside the open transaction.
+    ) -> set[CustomURL]:
+        """Claim every chunk of the caller's set inside the open transaction.
 
         All chunks share one `BEGIN IMMEDIATE` ... `COMMIT`, so a chunked claim is as atomic as a single-statement one. Each chunk binds the limit to what is still owed rather than to `max_items`, so chunking cannot push the claim past the caller's limit.
 
@@ -542,9 +543,9 @@ class SQLiteURLStateRepository(URLStateRepository):
             queue_timeout: How long a `queued` row may wait before it is re-claimed.
 
         Returns:
-            list[CustomURL]: Only the rows these statements moved to `queued`.
+            set[CustomURL]: The unique rows these statements moved to `queued`, unordered.
         """
-        claimed: list[CustomURL] = []
+        claimed: set[CustomURL] = set()
         for chunk in self._claim_chunks(urls):
             limit = (
                 models.NO_LIMIT
@@ -563,12 +564,12 @@ class SQLiteURLStateRepository(URLStateRepository):
             # SQLite discards an unstepped RETURNING's effect.
             async with self._connection.execute(statement, parameters) as cursor:
                 rows = await cursor.fetchall()
-            batch = [models.row_to_custom_url(row) for row in rows]
-            claimed.extend(batch)
+            batch = {models.row_to_custom_url(row) for row in rows}
+            claimed |= batch
             if not batch:
                 break
         self._logger.debug(
-            "claimed %d url(s) at %s, %d in the caller's list",
+            "claimed %d url(s) at %s, %d in the caller's set",
             len(claimed),
             now.isoformat(),
             0 if urls is None else len(urls),
@@ -576,24 +577,27 @@ class SQLiteURLStateRepository(URLStateRepository):
         return claimed
 
     def _claim_chunks(
-        self, urls: Sequence[CustomURL] | None
-    ) -> list[Sequence[CustomURL] | None]:
+        self, urls: Collection[CustomURL] | None
+    ) -> list[tuple[CustomURL, ...] | None]:
         """Split the caller's URLs into statement-sized chunks.
 
-        One statement cannot bind more placeholders than SQLite allows parameters, so a long caller list becomes several statements. A None entry stands for the single claim over every row, which binds no `IN (...)` list at all.
+        One statement cannot bind more placeholders than SQLite allows parameters, so a long caller set becomes several statements. A None entry stands for the single claim over every row, which binds no `IN (...)` list at all. The set is materialised into a tuple because a set is not sliceable, and no order is promised or needed.
 
         Args:
             urls: The caller's URLs, or None for the claim over every row.
 
         Returns:
-            list[Sequence[CustomURL] | None]: One entry per statement to issue.
+            list[tuple[CustomURL, ...] | None]: One entry per statement to issue.
         """
         if urls is None:
             return [None]
         size = max(
             1, models.MAX_BOUND_PARAMETERS - models.CLAIM_RESERVED_PARAMETERS
         )
-        return [urls[start : start + size] for start in range(0, len(urls), size)]
+        pending = tuple(urls)
+        return [
+            pending[start : start + size] for start in range(0, len(pending), size)
+        ]
 
     def _claim_parameters(
         self,
@@ -632,15 +636,17 @@ class SQLiteURLStateRepository(URLStateRepository):
 
     async def _write_outcomes(
         self,
-        finished: Sequence[tuple[CustomURL, datetime | None]],
-        discovered: Sequence[CustomURL],
+        finished: dict[CustomURL, datetime | None],
+        discovered: Collection[CustomURL],
         now: datetime,
     ) -> None:
         """Update every finished row, then insert every discovered one.
 
+        The finish update runs first, so a URL present in both collections is already a `finished_crawl` row when the insert sees it and the `ON CONFLICT DO NOTHING` skips it: one outcome and one increment. The dict is keyed by URL, so each outcome is written exactly once and `times_crawled` cannot rise by more than one per batch.
+
         Args:
-            finished: One `(url, next_crawl_time)` pair per attempted URL, where a None time stores NULL and schedules no re-crawl.
-            discovered: URLs to insert when absent, each becoming `not_crawled` with `created_time = next_crawl_time`.
+            finished: Each attempted URL mapped to its next due instant, where None stores NULL and schedules no re-crawl, unique by URL.
+            discovered: The unique URLs to insert when absent, each becoming `not_crawled` with `created_time = next_crawl_time`.
             now: The completion time, in UTC, stored on every written row.
         """
         if finished:
@@ -652,9 +658,9 @@ class SQLiteURLStateRepository(URLStateRepository):
                         "finished_state": CrawlState.FINISHED_CRAWL.value,
                         "next_crawl_time": next_crawl_time,
                         "now": now,
-            "now_epoch": _epoch_seconds(now),
+                        "now_epoch": _epoch_seconds(now),
                     }
-                    for url, next_crawl_time in finished
+                    for url, next_crawl_time in finished.items()
                 ],
             )
         if discovered:
