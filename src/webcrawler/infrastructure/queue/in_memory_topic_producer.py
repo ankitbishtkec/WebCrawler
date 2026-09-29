@@ -23,23 +23,20 @@ class InMemoryTopicProducer(TopicProducer):
     topic: The topic name from the port, recorded and never consulted.
     queue: The shared queue. It must be the same instance the
     reader reads from, or the poller fills a queue nobody reads.
-    logger: The injected logger. Joining the topic is DEBUG, and an
-    overflowed batch is DEBUG.
     """
 
     def __init__(
-        self, topic: str, queue: InMemorySingleTopicSinglePartitionQueue, logger: logging.Logger
-        ) -> None:
-        """Hold the topic name, the shared queue, and the logger.
+        self, topic: str, queue: InMemorySingleTopicSinglePartitionQueue
+    ) -> None:
+        """Hold the topic name and the shared queue.
 
         Args:
         topic: The topic to produce into, recorded and never consulted.
         queue: The shared queue, which must be the reader's queue.
-        logger: The injected logger.
         """
+        self._logger = logging.getLogger(__name__)
         self._topic = topic
         self._queue = queue
-        self._logger = logger
         self._logger.debug("using topic %s", topic)
 
     async def enqueue(

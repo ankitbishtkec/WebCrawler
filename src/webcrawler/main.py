@@ -39,6 +39,7 @@ from webcrawler.ports.request_middleware import RequestMiddleware
 from webcrawler.utils.logger import configure_logging
 
 # The values a deployment overrides; each one is a constructor argument below.
+LOG_LEVEL: int = logging.INFO
 DB_FILE: str = "webcrawler.db"
 BATCH_SIZE: int = 50
 JOB_TIMEOUT: timedelta = timedelta(minutes=1)
@@ -54,6 +55,8 @@ RETRY_SETTINGS: RetrySettings = RetrySettings(
     timeout_seconds=12.0)
 #a bit lower timeout for http call is used compared to the task object timeout
 HTTP_CALL_TIMEOUT_SECONDS: int = RETRY_SETTINGS.timeout_seconds - 2.0
+# The seed used when the operator just presses Enter at the prompt.
+DEFAULT_SEED_URL: str = "https://crawlme.monzo.com"
 # Several sites answer 503 to a non-browser agent, so the crawler presents as
 # a normal browser.
 async def main() -> None:
@@ -69,28 +72,25 @@ async def main() -> None:
     Exception: Whatever a collaborator raises outside the orchestrator's
     handled seed paths, propagated unchanged.
     """
-    #ankit: we should make a new logger with the class name in each class rather than passing it in constructor
-    #also the log level should be set. we can have a constant which can be referred for log level in all classes
-
     # Logging first: everything that logs is constructed after it. `--debug`
     # lowers the level only; a fetched url and its links stay at INFO either way.
     logger = configure_logging(
-        level=logging.DEBUG if "--debug" in sys.argv[1:] else logging.INFO
+        level=logging.DEBUG if "--debug" in sys.argv[1:] else LOG_LEVEL
     )
     print(
-        "Enter the seed URL to crawl, then press Ctrl+C at any time to "
-        "stop."
+        f"Enter the seed URL to crawl, then press Ctrl+C at any time to "
+        f"stop. Press Enter to crawl default seed url {DEFAULT_SEED_URL}."
         )
-    seed_line = input("seed url> ").strip()
+    seed_line = input("seed url> ").strip() or DEFAULT_SEED_URL
     time_provider = SystemTimeProvider()
     # One queue behind both views: the poller must fill the queue the worker
     # reads, or the crawl stops after the seed.
     queue = InMemorySingleTopicSinglePartitionQueue()
-    producer = InMemoryTopicProducer(TOPIC, queue, logger)
-    reader = InMemoryTopicReader(TOPIC, CONSUMER_GROUP_ID, queue, logger)
+    producer = InMemoryTopicProducer(TOPIC, queue)
+    reader = InMemoryTopicReader(TOPIC, CONSUMER_GROUP_ID, queue)
     # One retry policy, two owners: the store and the fetches.
     retry_policy = ExponentialBackoffRetryPolicy(RETRY_SETTINGS)
-    repository = SQLiteURLStateRepository(DB_FILE, retry_policy, time_provider, logger)
+    repository = SQLiteURLStateRepository(DB_FILE, retry_policy, time_provider)
     await repository.initialize()
     # The only source of request headers, applied in order; an auth middleware
     # belongs here too (README's Extensions section).
@@ -98,10 +98,9 @@ async def main() -> None:
         HeadersMiddleware(DEFAULT_HEADERS),)
     fetcher = AiohttpWebPageFetcher(
         HTTP_CALL_TIMEOUT_SECONDS,
-        logger,
         retry_policy,
         middlewares=request_middlewares)
-    link_extractor = HtmlLinkExtractor(logger)
+    link_extractor = HtmlLinkExtractor()
     # No wait is ever requested, so a crawl is not throttled; a delaying policy
     # is an extension (README) and the worker already drives any of them.
     politeness_policy = NoOpPolitenessPolicy()
@@ -110,8 +109,7 @@ async def main() -> None:
         producer,
         job_timeout=JOB_TIMEOUT,
         queue_timeout=QUEUE_TIMEOUT,
-        time_provider=time_provider,
-        logger=logger)
+        time_provider=time_provider)
     worker = CrawlerWorker(
         repository,
         reader,
@@ -122,9 +120,8 @@ async def main() -> None:
         producer=producer,
         batch_size=BATCH_SIZE,
         reschedule_delay=RESCHEDULE_DELAY,
-        time_provider=time_provider,
-        logger=logger)
-    orchestrator = Orchestrator(repository, poller, worker, seed_line, logger)
+        time_provider=time_provider)
+    orchestrator = Orchestrator(repository, poller, worker, seed_line)
     await orchestrator.run()
 
 

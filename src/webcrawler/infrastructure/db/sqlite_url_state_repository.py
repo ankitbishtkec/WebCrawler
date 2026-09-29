@@ -70,7 +70,6 @@ class SQLiteURLStateRepository(URLStateRepository):
         db_path: The database file, or `":memory:"`. Its parent directory must already exist, because one process owns the whole crawler and so only ever opens the file itself.
         retry_policy: Applied to every unit of work, and the only holder of the backoff, jitter, and per-attempt timeout this store needs.
         time_provider: The only source of "now" for a write, so `created_time == next_crawl_time` is the application's guarantee and never a coincidence of two clocks.
-        logger: The injected logger. The schema creation is DEBUG, each claim batch is DEBUG, and a retried statement is DEBUG.
     """
 
     def __init__(
@@ -78,7 +77,6 @@ class SQLiteURLStateRepository(URLStateRepository):
         db_path: str | Path,
         retry_policy: RetryPolicy,
         time_provider: TimeProviderFactory,
-        logger: logging.Logger,
     ) -> None:
         """Open a connection to the store. The schema is `initialize`'s job.
 
@@ -86,12 +84,11 @@ class SQLiteURLStateRepository(URLStateRepository):
             db_path: The database file, or `":memory:"`.
             retry_policy: Applied to every unit of work.
             time_provider: The only source of "now" for a write.
-            logger: The injected logger, used for the schema and claim records.
         """
+        self._logger = logging.getLogger(__name__)
         self._db_path = db_path
         self._retry_policy = retry_policy
         self._time_provider = time_provider
-        self._logger = logger
         self._transaction_lock = asyncio.Lock()
         # isolation_level=None disables the driver's implicit transaction, so
         # the explicit BEGIN IMMEDIATE is not wrapped as nested.
@@ -443,32 +440,10 @@ class SQLiteURLStateRepository(URLStateRepository):
         """Create the table and the composite index, then record the result."""
         for statement in models.SCHEMA_STATEMENTS:
             await self._run(statement)
-        await self._migrate_times_crawled()
         self._logger.debug(
             "url state schema created or already present at %s on SQLite %s",
             self._db_path,
             sqlite3.sqlite_version,
-        )
-
-    async def _migrate_times_crawled(self) -> None:
-        """Add the per-URL crawl counter to a database made before it existed.
-
-        `CREATE TABLE IF NOT EXISTS` cannot extend an existing table, so the guard reads the live column list and alters only when the column is missing; every other database is left untouched.
-
-        Raises:
-            sqlite3.Error: If the column list cannot be read or the alter fails, in which case the surrounding transaction rolls back.
-        """
-        async with self._connection.execute(
-            f"PRAGMA table_info({models.URLS_TABLE})"
-        ) as cursor:
-            columns = {row[1] for row in await cursor.fetchall()}
-        if "times_crawled" in columns:
-            return
-        await self._run(models.MIGRATE_TIMES_CRAWLED_SQL)
-        self._logger.debug(
-            "migrated %s at %s: added times_crawled",
-            models.URLS_TABLE,
-            self._db_path,
         )
 
     async def _select_crawlable(

@@ -18,36 +18,28 @@ class HtmlLinkExtractor(LinkExtractor):
     worker's parsing step stays substitutable.
     """
 
-    def __init__(self, logger: logging.Logger) -> None:
-        """Hold the logger; nothing is parsed until `extract` is called.
-
-        Args:
-            logger: The injected logger, the only one this class writes to.
-        """
-        self._logger = logger
+    def __init__(self) -> None:
+        """Hold nothing; nothing is parsed until `extract` is called."""
+        self._logger = logging.getLogger(__name__)
 
     def extract(self, html: str, base_url: CustomURL) -> list[CustomURL]:
         """Return the page's unique in-scope links, resolved against the page.
 
-        First-seen order; `CustomURL` hashing collapses duplicates and fragments.
+        `CustomURL` hashing collapses duplicates and fragments.
 
         Args:
             html: The page body to parse.
-            base_url: The URL the body was fetched from. It is used for the
-                relative hrefs.
+            base_url: The URL the body was fetched from, used to resolve relative hrefs.
 
         Returns:
-            list[CustomURL]: The in-scope links in first-seen order, with
-                duplicates collapsed and every fragment already dropped.
+            list[CustomURL]: The in-scope links, duplicates collapsed and fragments already dropped, in no promised order.
 
         Synchronous: pure CPU parsing, no I/O.
         """
         page_url = base_url.get_url()
         hrefs = collect_hrefs(html)
-        # A dict keyed by CustomURL is a set that still remembers insertion
-        # order, so dedupe and determinism come from one structure.
-        #ankit: use set instead of dict
-        unique: dict[CustomURL, None] = {}
+        # A set dedupes and no longer fixes an order, so the links are unordered.
+        unique: set[CustomURL] = set()
         for href in hrefs:
             target = self._to_url(href, page_url)
             # Exact hostname, never a suffix: a sibling subdomain such as
@@ -55,7 +47,7 @@ class HtmlLinkExtractor(LinkExtractor):
             # somebody else's site, so equality is the whole scope rule.
             if target is None or target.hostname != base_url.hostname:
                 continue
-            unique.setdefault(target, None)
+            unique.add(target)
         links = list(unique)
         # DEBUG, and not higher, because the summary is routine: a page full of
         # `mailto:` hrefs is ordinary rather than an error.

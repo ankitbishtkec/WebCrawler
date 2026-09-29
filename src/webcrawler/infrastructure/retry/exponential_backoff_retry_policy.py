@@ -68,8 +68,8 @@ class ExponentialBackoffRetryPolicy(RetryPolicy):
                     operation(), self._settings.timeout_seconds
                 )
             except NonRetryableError:
-                # The operation was given a final answer (a 503, a 404), so
-                # a backoff would only delay the crawl: re-raise at once.
+                # A final answer, such as a 404 or a 410, is not worth a backoff.
+                # 408, 425, 429, 500, 502, 503 and 504 are retried, so they reach here.
                 raise
             except Exception as error:  # noqa: BLE001 - re-raised below
                 last_error = error

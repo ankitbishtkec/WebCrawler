@@ -22,10 +22,10 @@ class NoOpPolitenessPolicy(PolitenessPolicy):
     to choose (composition over inheritance).
     """
 
-    def before_fetch(self, url: CustomURL) -> int:
-        """Report that no wait is configured, whatever the worker's threshold.
+    async def before_fetch(self, url: CustomURL) -> int:
+        """Report that no wait is configured, so a crawl proceeds at full speed.
 
-        `0` is the port's "call now", so a crawl proceeds at full speed.
+        A policy may do I/O here; this one returns a constant and records nothing.
 
         Args:
         url: The URL about to be fetched, ignored because no host is tracked.
@@ -33,20 +33,18 @@ class NoOpPolitenessPolicy(PolitenessPolicy):
         Returns:
         int: Always `NO_WAIT_MS`, the milliseconds to wait before the next
         request.
-
-        Synchronous: a constant, no I/O.
         """
         return NO_WAIT_MS
 
-    def record_fetch(self, now: datetime, url: CustomURL, result: BaseResult) -> None:
+    async def record_fetch(self, now: datetime, url: CustomURL, result: BaseResult) -> None:
         """Discard one completed attempt, keeping no state to learn from.
+
+        A policy may do I/O here; this one records nothing and holds no state.
 
         Args:
         now: When the attempt finished, in UTC, ignored.
         url: The URL that was fetched, ignored.
         result: How the attempt ended, ignored, because there is no delay to
         back off from.
-
-        Synchronous: nothing is recorded, no I/O.
         """
         return None

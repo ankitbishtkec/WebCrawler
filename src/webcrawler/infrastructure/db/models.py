@@ -1,8 +1,4 @@
 """The URL state schema, the row mapping, and the one crawlable predicate.
-
-The eligibility rule is encoded once here, so the read-only select, the
-candidate claim, and the caller's-URL claim cannot drift; the store holds
-transactions and no SQL.
 """
 
 import sqlite3
@@ -25,8 +21,7 @@ MIN_RETURNING_VERSION: Final = (3, 35, 0)
 
 NO_LIMIT: Final = -1
 
-# SQLite's historic floor for SQLITE_LIMIT_VARIABLE_NUMBER; aiosqlite proxies
-# no getlimit, and the real limit is only readable on the connection's thread.
+# max bound parameters which can be used in sql statement
 MAX_BOUND_PARAMETERS: Final = 999
 
 # `:claimed_state`, `:now`, and `:max_items` are bound by every chunk, so only
@@ -52,12 +47,6 @@ CREATE_TABLE_SQL: Final = f"""CREATE TABLE IF NOT EXISTS {URLS_TABLE} (
     last_status_update_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     times_crawled           INTEGER NOT NULL DEFAULT 0
 )"""
-
-# The per-URL crawl counter, added after the first release: CREATE TABLE IF NOT
-# EXISTS cannot extend a table, so an idempotent guarded ALTER TABLE adds it.
-MIGRATE_TIMES_CRAWLED_SQL: Final = f"""
-ALTER TABLE {URLS_TABLE} ADD COLUMN times_crawled INTEGER NOT NULL DEFAULT 0
-"""
 
 # An index on `custom_url` is the primary key's own, so only the composite
 # index is declared.

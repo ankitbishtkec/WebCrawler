@@ -117,24 +117,3 @@ class InMemorySingleTopicSinglePartitionQueue:
                 f"of {self._max_deadletter_size} messages"
             )
         self._deadletters.append(message)
-
-#ankit: remove if this code is not used
-    def peek_deadletter(self, n: int) -> list[BaseMessage]:
-        """Read the deadletter head without removing anything.
-
-        Args:
-            n: The largest number of items wanted.
-
-        Returns:
-            list[BaseMessage]: Up to `n` parked messages, leaving the deque
-                unchanged. Empty when `n` is not positive.
-        """
-        if n <= 0:
-            return []
-        return list(islice(self._deadletters, n))
-
-#ankit: remove if this code is not used
-    @property
-    def deadletter_count(self) -> int:
-        """int: How many messages are parked, without removing any."""
-        return len(self._deadletters)

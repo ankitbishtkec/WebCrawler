@@ -27,7 +27,6 @@ class URLPoller(CrawlQueuer):
     """
 
     def __init__(
-
         self,
         repository: URLStateRepository,
         producer: TopicProducer,
@@ -38,7 +37,6 @@ class URLPoller(CrawlQueuer):
         job_timeout: timedelta,
         queue_timeout: timedelta,
         time_provider: TimeProviderFactory,
-        logger: logging.Logger,
     ) -> None:
         """Hold the ports and the schedule the poller was configured with.
 
@@ -51,8 +49,8 @@ class URLPoller(CrawlQueuer):
             job_timeout: The `started_crawl` staleness timeout.
             queue_timeout: The `queued` staleness timeout.
             time_provider: The only source of "now".
-            logger: The injected logger.
         """
+        self._logger = logging.getLogger(__name__)
         self._repository = repository
         self._producer = producer
         self._periodic_fetch_seconds = periodic_fetch_seconds
@@ -63,7 +61,6 @@ class URLPoller(CrawlQueuer):
         self._job_timeout = job_timeout
         self._queue_timeout = queue_timeout
         self._time_provider = time_provider
-        self._logger = logger
 
     async def run(self) -> None:
         """Poll the store forever, one claim and one bulk feed per poll.
@@ -170,6 +167,7 @@ class URLPoller(CrawlQueuer):
                     url.get_url(),
                     self._queue_timeout,
                 )
+
     async def enqueue_urls(
         self, urls: list[CustomURL], request_id: str | None = None
     ) -> None:

@@ -1,7 +1,7 @@
-"""The console logger: one stdlib stream handler, set up once at startup.
+"""The console logger, one stdlib stream handler, set up once at startup.
 
-Every major class takes a `logging.Logger`: `log.debug` for detail, `log.info` only for a
-fetched URL and its found links, `log.warning`/`log.error` for a degraded or failed step.
+Every class names its own `logging.getLogger(__name__)`; the handler added here
+to the project logger is what those children reach by propagation.
 `main.py` calls `configure_logging` first.
 """
 
@@ -22,7 +22,8 @@ def configure_logging(level: int = logging.INFO) -> logging.Logger:
     level: The lowest level a record must have to be printed.
 
     Returns:
-    logging.Logger: The `webcrawler` logger, ready to be injected.
+    logging.Logger: The `webcrawler` logger, whose handler every child logger
+    reaches by propagation.
     """
     project = logging.getLogger(ROOT_LOGGER_NAME)
     project.setLevel(level)

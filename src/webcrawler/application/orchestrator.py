@@ -23,7 +23,6 @@ class Orchestrator:
         poller: URLPoller,
         worker: CrawlerWorker,
         seed_line: str,
-        logger: logging.Logger,
     ) -> None:
         """Hold the collaborators; nothing is started here.
 
@@ -32,16 +31,15 @@ class Orchestrator:
         poller: The queuer and the one poll loop this class runs.
         worker: The crawl consumer.
         seed_line: The operator's single seed URL.
-        logger: The injected logger.
 
         Returns:
         None
         """
+        self._logger = logging.getLogger(__name__)
         self._repository = repository
         self._poller = poller
         self._worker = worker
         self._seed_line = seed_line
-        self._logger = logger
 
     async def run(self) -> None:
         """Seed the crawl once, then run the poller and the worker together.
@@ -91,7 +89,7 @@ class Orchestrator:
                 seed.get_url(),
             )
             # A group takes both tasks down if one fails and awaits each before it
-            # returns, so the `finally` needs only to close the store.
+            # returns, so the `finally` needs only to release the collaborators.
             try:
                 async with asyncio.TaskGroup() as group:
                     group.create_task(self._poller.run())
@@ -101,4 +99,9 @@ class Orchestrator:
                     "a crawl task failed, so the crawl is over: %s", error
                 )
         finally:
-            await self._repository.close()
+            # The worker first, so the pooled session is released while the store
+            # is still open, and the store closes even if that close raises.
+            try:
+                await self._worker.close()
+            finally:
+                await self._repository.close()

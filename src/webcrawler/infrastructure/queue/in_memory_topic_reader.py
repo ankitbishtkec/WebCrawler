@@ -24,7 +24,6 @@ class InMemoryTopicReader(TopicReader):
     this implementation, kept because the interface carries it.
     queue: The shared queue. It must be the same instance the
     producer writes to, or the reader reads an empty queue.
-    logger: The injected logger, which records the join at INFO.
     """
 
     def __init__(
@@ -32,20 +31,19 @@ class InMemoryTopicReader(TopicReader):
         topic: str,
         consumer_group_id: str,
         queue: InMemorySingleTopicSinglePartitionQueue,
-        logger: logging.Logger) -> None:
-        """Hold the topic, group, queue, and logger.
+    ) -> None:
+        """Hold the topic, the group, and the shared queue.
 
         Args:
         topic: The topic to read, recorded and never consulted.
         consumer_group_id: The group this reader belongs to; recorded and
         never used.
         queue: The shared queue, which must be the producer's queue.
-        logger: The injected logger.
         """
+        self._logger = logging.getLogger(__name__)
         self._topic = topic
         self._consumer_group_id = consumer_group_id
         self._queue = queue
-        self._logger = logger
         self._logger.debug(
             "reading topic %s as group %s", topic, consumer_group_id
             )

@@ -33,7 +33,6 @@ class CrawlerWorker:
     interrupts it.
     """
 
-
     def __init__(
         self,
         repository: URLStateRepository,
@@ -49,7 +48,6 @@ class CrawlerWorker:
         reschedule_delay: timedelta = timedelta(minutes=1),
         re_crawl_interval: timedelta | None = None,
         time_provider: TimeProviderFactory,
-        logger: logging.Logger,
     ) -> None:
         """Hold the ports and the schedule this worker was configured with.
 
@@ -66,8 +64,8 @@ class CrawlerWorker:
         reschedule_delay: The delay applied after a failed URL.
         re_crawl_interval: The re-crawl interval, or None for no re-crawl.
         time_provider: The only source of "now".
-        logger: The injected logger.
         """
+        self._logger = logging.getLogger(__name__)
         self._repository = repository
         self._reader = reader
         self._fetcher = fetcher
@@ -80,9 +78,11 @@ class CrawlerWorker:
         self._reschedule_delay = reschedule_delay
         self._re_crawl_interval = re_crawl_interval
         self._time_provider = time_provider
-        self._logger = logger
 
-#ankit: this should be part of interface's abstart methods in ports
+    async def close(self) -> None:
+        """Release the fetcher's pooled session, since this class owns it."""
+        await self._fetcher.close()
+
     async def run(self) -> None:
         """Read batches until cancelled, recording each one.
 
@@ -239,7 +239,7 @@ class CrawlerWorker:
         # Every step is inside the one handler: the batch runs in a task group, so
         # a raise would take the whole batch down rather than one URL.
         try:
-            wait_ms = self._politeness_policy.before_fetch(url)
+            wait_ms = await self._politeness_policy.before_fetch(url)
             if wait_ms > 0:
                 return (url, now + timedelta(milliseconds=wait_ms)), [], True
             is_success = False
@@ -259,7 +259,7 @@ class CrawlerWorker:
             finally:
                 # One outcome per attempt, given back even when it failed, so a
                 # learning policy can back off from it.
-                self._politeness_policy.record_fetch(
+                await self._politeness_policy.record_fetch(
                     now, url, BaseResult(is_success=is_success)
                 )
             if not is_success:

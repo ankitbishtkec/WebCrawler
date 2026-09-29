@@ -12,8 +12,18 @@ from webcrawler.domain.custom_url import CustomURL
 
 
 class CrawlQueuer(ABC):
-    """Queues crawl work now, either URLs the caller names or due candidates."""
-#ankit: missing run function which polls like in url poller
+    """Queues crawl work now, either URLs the caller names or due candidates.
+
+    `run` owns the poll loop itself, so the caller never drives the schedule.
+    """
+    @abstractmethod
+    async def run(self) -> None:
+        """Poll the store and feed the queue until the task is cancelled.
+
+        Raises:
+            Exception: A networked implementation may raise while polling; the shipped in-memory one never does.
+        """
+
     @abstractmethod
     async def enqueue_urls(
         self, urls: list[CustomURL], request_id: str

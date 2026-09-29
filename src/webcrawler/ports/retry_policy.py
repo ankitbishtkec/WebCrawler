@@ -15,9 +15,8 @@ T = TypeVar("T")
 class RetryPolicy(ABC):
     """Runs one fallible operation with a deadline and exponential backoff.
 
-Whether a failure is worth retrying is the operation's call, not the policy's: an operation
-given a final answer, such as a 503 from a site that refuses this client, raises
-    `NonRetryableError`, which the policy re-raises at once.
+    The operation decides: a `RETRYABLE_STATUS_CODES` status raises `RetryableStatusError`
+    and is backed off, any other non-2xx raises `NonRetryableError` and is re-raised at once.
     """
 
 
@@ -34,7 +33,7 @@ given a final answer, such as a 503 from a site that refuses this client, raises
             T: Whatever the successful attempt returned.
 
         Raises:
-            NonRetryableError: The first attempt's final answer, re-raised at once with no backoff spent on it.
+            NonRetryableError: The first attempt's final answer, meaning any non-2xx status outside `RETRYABLE_STATUS_CODES`, re-raised at once with no backoff spent on it.
             Exception: The last failure, once the attempt budget is spent.
             asyncio.TimeoutError: If the final attempt exceeded the deadline.
         """
