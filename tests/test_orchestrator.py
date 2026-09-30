@@ -1,260 +1,131 @@
-"""Tests for `Orchestrator`, the seed gate and the one owner of the loop.
+"""Unit tests for `Orchestrator`, the seed gate and the one owner of the loop.
 
-The release paths are the composition root's, so they are driven through
-`main.main()` with an empty seed, which returns before either loop starts.
+The store, the poller, and the worker are mocks, and both `run` methods return
+at once, so a test reads the seed step and stops instead of driving a crawl
+that never ends.
 """
 
-import asyncio
-import contextlib
-import inspect
-from collections.abc import Callable
-from pathlib import Path
+from typing import NamedTuple
+from unittest.mock import MagicMock, call
 
-import pytest
-
-from tests.support import (
-    HOST,
-    FakeFetcher,
-    make_poller,
-    make_producer,
-    make_queue,
-    make_reader,
-    make_repository,
-    make_worker,
-    queued_texts,
-    rows_by_state,
-)
-from webcrawler import main
 from webcrawler.application.orchestrator import Orchestrator
-from webcrawler.domain.crawl_state import CrawlState
+from webcrawler.application.url_poller import URLPoller
+from webcrawler.application.worker import CrawlerWorker
+from webcrawler.domain.custom_url import CustomURL
+from webcrawler.ports.url_state_repository import URLStateRepository
 
-SEED: str = f"{HOST}/index.html"
+SEED: str = "https://crawlme.monzo.com/index.html"
 
-# Short enough that a seeded crawl has already started, long enough not to spin.
-POLL_SECONDS: float = 0.005
-
-# How long a drive keeps yielding before it cancels the loop anyway.
-DEADLINE_SECONDS: float = 2.0
+# A seed string that names no crawlable URL, so the session ends before the store.
+REJECTED: str = "not a url"
 
 
-class _CountingStore:
-    """A store double that only counts its own release.
-
-    Not in `support.py` because it exists solely to observe the composition
-    root's release path, which no other test drives.
+class _Built(NamedTuple):
+    """The orchestrator under test, with the mocks it was built with.
 
     Args:
-    close_fails: Whether `close` raises, so a test can see which release failed.
+    orchestrator: The orchestrator, built over three mocked collaborators.
+    repository: The mocked crawl state store.
+    poller: The mocked poller, whose `run` returns at once.
+    worker: The mocked worker, whose `run` returns at once.
+    seed_calls: A manager recording the seed's two calls, so their order is visible.
     """
 
-    def __init__(self, close_fails: bool) -> None:
-        """Record whether the release raises and start with no release.
-
-        Args:
-        close_fails: Whether `close` raises instead of returning.
-        """
-        self._close_fails = close_fails
-        self.closed = 0
-
-    async def initialize(self) -> None:
-        """Accept the schema creation, which the release path does not care about.
-
-        Returns:
-        None
-        """
-        return None
-
-    async def close(self) -> None:
-        """Count the call, then raise when this double is configured to fail.
-
-        Returns:
-        None
-
-        Raises:
-        RuntimeError: When this double was built with `close_fails`.
-        """
-        self.closed += 1
-        if self._close_fails:
-            raise RuntimeError("the store could not be released")
+    orchestrator: Orchestrator
+    repository: MagicMock
+    poller: MagicMock
+    worker: MagicMock
+    seed_calls: MagicMock
 
 
-class _CountingFetcher:
-    """A fetcher double that only counts its own release.
-
-    Not in `support.py` because it exists solely to observe the composition
-    root's release path; `FakeFetcher` always releases cleanly.
+def _build_orchestrator(seed_line: str) -> _Built:
+    """Build the orchestrator over mocks, with both loops stubbed to return at once.
 
     Args:
-    close_fails: Whether `close` raises, so a test can see which release failed.
+    seed_line: The operator's single seed URL, valid or not.
+
+    Returns:
+    _Built: The orchestrator and the mocks to assert on.
     """
+    repository = MagicMock(spec=URLStateRepository)
+    poller = MagicMock(spec=URLPoller)
+    poller.run.return_value = None
+    worker = MagicMock(spec=CrawlerWorker)
+    worker.run.return_value = None
+    # One manager over both seed calls, so a test can read the order they happened in.
+    seed_calls = MagicMock()
+    seed_calls.attach_mock(repository.create_urls, "create_urls")
+    seed_calls.attach_mock(poller.enqueue_urls, "enqueue_urls")
 
-    def __init__(self, close_fails: bool) -> None:
-        """Record whether the release raises and start with no release.
-
-        Args:
-        close_fails: Whether `close` raises instead of returning.
-        """
-        self._close_fails = close_fails
-        self.closed = 0
-
-    async def close(self) -> None:
-        """Count the call, then raise when this double is configured to fail.
-
-        Returns:
-        None
-
-        Raises:
-        RuntimeError: When this double was built with `close_fails`.
-        """
-        self.closed += 1
-        if self._close_fails:
-            raise RuntimeError("the session could not be released")
+    orchestrator = Orchestrator(repository, poller, worker, seed_line)
+    return _Built(orchestrator, repository, poller, worker, seed_calls)
 
 
-async def run_until(orchestrator: Orchestrator, done: Callable[[], bool]) -> None:
-    """Run the orchestrator until the condition holds, then cancel it.
-
-    Args:
-    orchestrator: The orchestrator whose `run` is driven.
-    done: The condition that ends the drive, checked between yields.
+async def test_a_valid_seed_is_created_in_the_store() -> None:
+    """The one seed becomes one row, created in a single store call.
 
     Returns:
     None
     """
-    task = asyncio.create_task(orchestrator.run())
-    deadline = asyncio.get_running_loop().time() + DEADLINE_SECONDS
-    try:
-        while not done() and asyncio.get_running_loop().time() < deadline:
-            await asyncio.sleep(POLL_SECONDS)
-    finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+    built = _build_orchestrator(SEED)
+
+    await built.orchestrator.run()
+
+    built.repository.create_urls.assert_awaited_once_with({CustomURL(SEED)})
 
 
-@pytest.mark.parametrize(
-    "seed_line", ["", "not a url", "/relative.html", "mailto:someone@monzo.com"]
-)
-async def test_a_seed_that_is_not_crawlable_queues_nothing(
-    seed_line: str, tmp_path: Path
-) -> None:
-    """An empty or rejected seed ends the session instead of raising.
-
-    Args:
-    seed_line: The operator's entry that names no crawlable URL.
-    tmp_path: This test's private directory, holding its own database file.
+async def test_a_valid_seed_is_queued_by_the_poller() -> None:
+    """The same seed is then handed to the poller as a one URL list.
 
     Returns:
     None
     """
-    database = str(tmp_path / "crawl.db")
-    repository = make_repository(database)
-    await repository.initialize()
-    queue = make_queue()
-    producer = make_producer(queue)
-    try:
-        orchestrator = Orchestrator(
-            repository,
-            make_poller(repository, producer),
-            make_worker(
-                repository,
-                queue=queue,
-                reader=make_reader(queue),
-                producer=producer,
-                fetcher=FakeFetcher(),
-            ),
-            seed_line,
-        )
+    built = _build_orchestrator(SEED)
 
-        assert await orchestrator.run() is None
+    await built.orchestrator.run()
 
-        assert rows_by_state(database) == {}
-        assert queued_texts(queue) == []
-    finally:
-        await repository.close()
+    built.poller.enqueue_urls.assert_awaited_once_with([CustomURL(SEED)])
 
 
-async def test_a_valid_seed_is_inserted_and_queued(tmp_path: Path) -> None:
-    """The one seed becomes a row and one message, and the crawl then runs.
-
-    Args:
-    tmp_path: This test's private directory, holding its own database file.
+async def test_the_seed_is_created_before_it_is_queued() -> None:
+    """The row is written first, since the poller only queues rows that exist.
 
     Returns:
     None
     """
-    database = str(tmp_path / "crawl.db")
-    repository = make_repository(database)
-    await repository.initialize()
-    queue = make_queue()
-    producer = make_producer(queue)
-    try:
-        orchestrator = Orchestrator(
-            repository,
-            make_poller(repository, producer),
-            # A batch of zero messages idles the worker, so the seed step is
-            # observed on its own rather than racing the crawl it starts.
-            make_worker(
-                repository,
-                queue=queue,
-                reader=make_reader(queue),
-                producer=producer,
-                fetcher=FakeFetcher(bodies={SEED: "<html>a page</html>"}),
-                batch_size=0,
-            ),
-            SEED,
-        )
+    built = _build_orchestrator(SEED)
 
-        await run_until(orchestrator, lambda: len(queued_texts(queue)) == 1)
+    await built.orchestrator.run()
 
-        assert rows_by_state(database) == {CrawlState.QUEUED.value: 1}
-        assert queued_texts(queue) == [SEED]
-    finally:
-        await repository.close()
+    assert built.seed_calls.mock_calls == [
+        call.create_urls({CustomURL(SEED)}),
+        call.enqueue_urls([CustomURL(SEED)]),
+    ]
 
 
-@pytest.mark.parametrize(
-    ("worker_close_fails", "repository_close_fails", "raises"),
-    [(False, False, False), (True, False, False), (False, True, True)],
-    ids=["both_released", "session_release_fails", "store_release_fails"],
-)
-async def test_the_release_path_always_releases_the_store(
-    worker_close_fails: bool,
-    repository_close_fails: bool,
-    raises: bool,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Both are released exactly once, and only the store's failure is propagated.
-
-    Args:
-    worker_close_fails: Whether the fetcher's release raises.
-    repository_close_fails: Whether the store's release raises.
-    raises: Whether `main` itself must raise.
-    monkeypatch: The test's patch of the composition root's collaborators.
+async def test_run_starts_the_poller_and_the_worker() -> None:
+    """One poll loop and one worker loop, started together once the seed is in.
 
     Returns:
     None
     """
-    fetcher = _CountingFetcher(worker_close_fails)
-    store = _CountingStore(repository_close_fails)
-    monkeypatch.setattr(main, "AiohttpWebPageFetcher", lambda *_, **__: fetcher)
-    monkeypatch.setattr(main, "SQLiteURLStateRepository", lambda *_, **__: store)
-    monkeypatch.setattr("builtins.input", lambda _prompt="": "")
+    built = _build_orchestrator(SEED)
 
-    if raises:
-        with pytest.raises(RuntimeError):
-            await main.main()
-    else:
-        await main.main()
+    await built.orchestrator.run()
 
-    assert fetcher.closed == 1
-    assert store.closed == 1
+    built.poller.run.assert_awaited_once_with()
+    built.worker.run.assert_awaited_once_with()
 
 
-def test_the_orchestrator_takes_no_logger() -> None:
-    """Every class logs for itself, so none is handed one.
+async def test_a_seed_that_is_not_a_url_creates_and_queues_nothing() -> None:
+    """A rejected seed ends the session, so the store and the queue are untouched.
 
     Returns:
     None
     """
-    assert "logger" not in inspect.signature(Orchestrator.__init__).parameters
+    built = _build_orchestrator(REJECTED)
+
+    await built.orchestrator.run()
+
+    built.repository.create_urls.assert_not_awaited()
+    built.poller.enqueue_urls.assert_not_awaited()

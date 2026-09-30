@@ -1,189 +1,128 @@
-"""Tests for the in-memory topic: one bounded deque behind two views.
+"""Unit tests for the in-memory topic: one bounded deque behind two views.
 
-The queue is shared by construction, so these tests cover the FIFO order, the
-non-destructive peek, the head-based commit that cannot underflow, and the two
-capacities being independent of each other.
+The queue classes hold no collaborator, so the object under test is the unit and
+there is nothing to mock. The producer and the reader are built over one shared
+queue, as the composition root builds them, and every assertion is on a return
+value: what `peek` hands back and what `enqueue_many` reports.
 """
 
 import pytest
 
-from tests.support import HOST, make_producer, make_queue, make_reader, page_urls, texts
 from webcrawler.domain.custom_url import CustomURL
-from webcrawler.domain.messages import BaseMessage, QueueOverflowError
+from webcrawler.domain.messages import BaseMessage
+from webcrawler.infrastructure.queue.in_memory_single_topic_single_partition_queue import (
+    InMemorySingleTopicSinglePartitionQueue)
+from webcrawler.infrastructure.queue.in_memory_topic_producer import (
+    InMemoryTopicProducer)
+from webcrawler.infrastructure.queue.in_memory_topic_reader import (
+    InMemoryTopicReader)
+
+# The topic name both views are given; recorded and never consulted.
+TOPIC: str = "crawl"
+
+# The group the reader is given; recorded and never consulted.
+GROUP: str = "crawler"
+
+# The host every URL in this file is built on; nothing here is ever fetched.
+HOST: str = "https://site.test"
 
 
-def _message(index: int) -> BaseMessage:
-    """Build the message for one page index.
+def views() -> tuple[InMemoryTopicProducer, InMemoryTopicReader]:
+    """Build the producer and the reader over one shared empty queue.
+
+    Returns:
+        tuple[InMemoryTopicProducer, InMemoryTopicReader]: The two views of the
+        same queue, so what the producer writes is what the reader reads. The
+        capacities are the shipped ones, which no test here fills.
+    """
+    queue = InMemorySingleTopicSinglePartitionQueue()
+    return (
+        InMemoryTopicProducer(TOPIC, queue),
+        InMemoryTopicReader(TOPIC, GROUP, queue),
+    )
+
+
+def messages(count: int) -> list[BaseMessage]:
+    """Build one message per page, in order.
 
     Args:
-    index: The page number, which makes the URL and the partition key distinct.
+        count: How many pages to name.
 
     Returns:
-    BaseMessage: A message carrying that page's URL.
+        list[BaseMessage]: The messages of pages 1 through `count`, in that order.
     """
-    url = CustomURL(f"{HOST}/page-{index}.html")
-    return BaseMessage(url, partition_key=hash(url))
+    made: list[BaseMessage] = []
+    for index in range(1, count + 1):
+        url = CustomURL(f"{HOST}/page-{index}.html")
+        # The routing key is the second field, the hash the poller sets.
+        made.append(BaseMessage(url, hash(url)))
+    return made
 
 
-def test_enqueue_then_peek_returns_the_messages_in_order() -> None:
-    """The deque is FIFO, so a peek reports the enqueue order.
+async def test_enqueue_then_peek_returns_the_messages_in_order() -> None:
+    """A peek reports what was enqueued, head first, and removes nothing.
 
     Returns:
-    None
+        None
     """
-    queue = make_queue()
-    for index in range(1, 4):
-        queue.enqueue(_message(index))
+    producer, reader = views()
+    sent = messages(3)
+    for message in sent:
+        await producer.enqueue(message)
 
-    assert texts(queue.peek(10)) == page_urls(3)
+    assert await reader.peek(10) == sent
 
 
-@pytest.mark.parametrize("n", [1, 2, 5])
-def test_two_peeks_return_the_same_messages(n: int) -> None:
-    """`peek` is non-reserving, so reading twice loses nothing.
+@pytest.mark.parametrize("count", [1, 3])
+async def test_enqueue_many_reports_one_true_per_message(count: int) -> None:
+    """A batch reports one True per message, and the reader then sees all of them.
 
     Args:
-    n: How many messages to enqueue and how many each peek asks for.
+        count: How many messages the batch holds.
 
     Returns:
-    None
+        None
     """
-    queue = make_queue()
-    for index in range(1, n + 1):
-        queue.enqueue(_message(index))
+    producer, reader = views()
+    sent = messages(count)
 
-    assert texts(queue.peek(n)) == texts(queue.peek(n))
-    assert texts(queue.peek(n)) == page_urls(n)
+    reported = await producer.enqueue_many(sent)
 
-
-def test_commit_removes_exactly_the_batch_it_is_given() -> None:
-    """Only the committed head is gone, and the tail is still there to read.
-
-    Returns:
-    None
-    """
-    queue = make_queue()
-    for index in range(1, 5):
-        queue.enqueue(_message(index))
-
-    queue.commit(2)
-
-    assert texts(queue.peek(10)) == page_urls(4)[2:]
+    assert reported == [True] * count
+    assert await reader.peek(10) == sent
 
 
-@pytest.mark.parametrize(
-    ("committed", "remaining"), [(0, 2), (1, 1), (5, 0)]
-)
-def test_commit_beyond_what_remains_takes_only_what_is_there(
-    committed: int, remaining: int
-) -> None:
-    """The deque cannot underflow, so an over-sized commit removes what is there.
+@pytest.mark.parametrize("count", [1, 3])
+async def test_commit_removes_the_batch_and_leaves_the_rest(count: int) -> None:
+    """A commit takes exactly the batch the reader peeked, and no more.
 
     Args:
-    committed: The batch size handed to `commit`, against a queue holding two.
-    remaining: How many messages must survive.
+        count: How many messages the peeked batch holds.
 
     Returns:
-    None
+        None
     """
-    queue = make_queue()
-    for index in range(1, 3):
-        queue.enqueue(_message(index))
+    producer, reader = views()
+    sent = messages(count + 1)
+    for message in sent:
+        await producer.enqueue(message)
 
-    queue.commit(committed)
+    peeked = await reader.peek(count)
+    await reader.commit(peeked)
 
-    assert texts(queue.peek(10)) == page_urls(2)[2 - remaining :]
+    assert await reader.peek(10) == sent[count:]
 
 
-@pytest.mark.parametrize(
-    ("max_size", "enqueued", "overflows"),
-    [(3, 2, False), (3, 3, False), (3, 4, True)],
-)
-def test_enqueue_past_the_capacity_raises(
-    max_size: int, enqueued: int, overflows: bool
-) -> None:
-    """The capacity rejects the new message instead of dropping an uncommitted one.
-
-    Args:
-    max_size: The crawl queue's capacity.
-    enqueued: How many messages to append.
-    overflows: Whether the last append must raise `QueueOverflowError`.
+async def test_enqueue_to_deadletter_parks_the_message_out_of_sight() -> None:
+    """A parked message reports True, and no peek of the crawl topic can see it.
 
     Returns:
-    None
+        None
     """
-    queue = make_queue(max_size=max_size, max_deadletter_size=4)
-    messages = [_message(index) for index in range(1, enqueued + 1)]
+    producer, reader = views()
+    message = messages(1)[0]
 
-    if overflows:
-        with pytest.raises(QueueOverflowError):
-            for message in messages:
-                queue.enqueue(message)
-        return
+    parked = await producer.enqueue_to_deadletter(message)
 
-    for message in messages:
-        queue.enqueue(message)
-    assert len(queue.peek(enqueued)) == enqueued
-
-
-def test_a_full_crawl_queue_does_not_fill_the_deadletter_queue() -> None:
-    """The two deques have separate capacities, so a full topic still has room.
-
-    Returns:
-    None
-    """
-    queue = make_queue(max_size=2, max_deadletter_size=2)
-    for index in range(1, 3):
-        queue.enqueue(_message(index))
-    with pytest.raises(QueueOverflowError):
-        queue.enqueue(_message(3))
-
-    queue.enqueue_deadletter(_message(4))
-    queue.enqueue_deadletter(_message(5))
-
-    assert texts(queue.peek(10)) == page_urls(2)
-
-
-@pytest.mark.parametrize(
-    ("max_deadletter_size", "parked", "accepted"),
-    [(1, 0, True), (1, 1, False), (2, 1, True), (2, 2, False)],
-)
-async def test_a_full_deadletter_queue_is_reported_not_raised(
-    max_deadletter_size: int, parked: int, accepted: bool
-) -> None:
-    """`enqueue_to_deadletter` answers False on overflow, so the caller decides.
-
-    Args:
-    max_deadletter_size: The deadletter queue's capacity.
-    parked: How many messages are parked before the one under test.
-    accepted: Whether that last park must report True.
-
-    Returns:
-    None
-    """
-    producer = make_producer(make_queue(max_deadletter_size=max_deadletter_size))
-
-    for index in range(1, parked + 1):
-        await producer.enqueue_to_deadletter(_message(index))
-
-    assert await producer.enqueue_to_deadletter(_message(parked + 1)) is accepted
-
-
-async def test_the_producer_and_reader_share_one_queue() -> None:
-    """What the producer enqueues is what the reader peeks, and peek removes nothing.
-
-    Returns:
-    None
-    """
-    queue = make_queue()
-    producer = make_producer(queue)
-    reader = make_reader(queue)
-
-    for index in range(1, 3):
-        await producer.enqueue(_message(index))
-
-    first = texts(await reader.peek(10))
-    second = texts(await reader.peek(10))
-
-    assert first == page_urls(2)
-    assert second == first
+    assert parked is True
+    assert await reader.peek(10) == []

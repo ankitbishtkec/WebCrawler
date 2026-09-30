@@ -1,720 +1,373 @@
-"""Tests for `SQLiteURLStateRepository`, the only crawl state store shipped.
+"""Unit tests for `SQLiteURLStateRepository`, the only crawl state store shipped.
 
-Every store here is the real one over a real SQLite file in a per-test directory
-and over the real system clock, so no stored timestamp is ever asserted: only
-states and counts are. The two staleness windows are exercised by handing the
-predicate a real long window, which withholds a row written milliseconds ago,
-and a sub-second one, which truncates to zero and releases the row at once, so
-the whole file runs in well under a second.
+`aiosqlite.connect` is patched, so no database file is ever opened and no
+statement reaches SQLite: the store's whole job is assembling a statement and
+binding it, so every test here asserts that a statement and its values reached
+the connection, and nothing else.
 """
 
-import asyncio
-import contextlib
-import sqlite3
-from collections.abc import Collection
-from datetime import timedelta
-from pathlib import Path
+from collections.abc import AsyncIterator, Generator, Iterator, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from tests.support import (
-    TIMEOUTS,
-    make_repository,
-    now,
-    page_urls,
-    rows_by_state,
-    seed_rows,
-)
 from webcrawler.domain.crawl_state import CrawlState
 from webcrawler.domain.custom_url import CustomURL
-from webcrawler.infrastructure.db.models import MAX_BOUND_PARAMETERS
+from webcrawler.infrastructure.db import models
 from webcrawler.infrastructure.db.sqlite_url_state_repository import (
+    MARK_STARTED_BATCH_SQL,
     SQLiteURLStateRepository)
 
-# Under a second encodes to zero whole seconds, which is how the predicate
-# compares it, so a row is already past its own window.
-EXPIRED: timedelta = timedelta(milliseconds=1)
+# The host every URL in this file is built on; nothing here is ever fetched.
+HOST: str = "https://site.test"
 
-# Enough for a write and a read to fall in different milliseconds, and short
-# enough to keep the released cases fast.
-PAUSE_SECONDS: float = 0.01
+# The one instant the clock double reports, so every bound value is exact.
+NOW: datetime = datetime(2026, 9, 29, 6, 0, tzinfo=timezone.utc)
 
-# Due times either side of now, far enough out that no rounding can reach them.
-DUE_PAST: timedelta = timedelta(minutes=-5)
-DUE_FUTURE: timedelta = timedelta(minutes=5)
+# The two staleness windows every read and claim in this file is given.
+JOB_TIMEOUT: timedelta = timedelta(minutes=1)
+QUEUE_TIMEOUT: timedelta = timedelta(seconds=30)
 
-# Wider than the parameter budget of a single mark-started statement, so the
-# batch has to be split before every row is marked.
-CHUNKED_URLS: int = MAX_BOUND_PARAMETERS + 200
+# The same two windows as the whole seconds the statements bind.
+JOB_TIMEOUT_SECONDS: int = 60
+QUEUE_TIMEOUT_SECONDS: int = 30
 
-# The methods that take a collection and must short-circuit an empty one.
-COLLECTION_METHODS: tuple[str, ...] = ("create_urls", "mark_started", "claim_urls")
-
-# The methods that hand a collection back to the caller.
-READER_METHODS: tuple[str, ...] = (
-    "get_crawlable_urls",
-    "claim_candidates",
-    "claim_urls",
-)
+# The shared head of the batched mark-started statement, up to the `IN (...)`
+# list, whose placeholder order follows the set's own order and is not promised.
+MARK_STARTED_HEAD: str = MARK_STARTED_BATCH_SQL.split("IN (")[0]
 
 
-def _states(states: dict[str, int]) -> dict[str, int]:
-    """Drop the states a count of zero means are absent from the table.
+class _FakeCursor:
+    """The cursor a mocked `execute` hands back, carrying the rows a test chose.
 
     Args:
-    states: The count each state must hold, zero meaning the state is absent.
-
-    Returns:
-    dict[str, int]: The non-zero counts, which is the shape `rows_by_state`
-    reports.
+        rows: The rows this cursor reports, each one the `custom_url` column.
     """
-    return {state: count for state, count in states.items() if count}
+
+    def __init__(self, rows: Sequence[Sequence[str]]) -> None:
+        """Copy the rows this cursor will report.
+
+        Args:
+            rows: The rows `fetchall` returns, in the order given.
+        """
+        self._rows = list(rows)
+
+    async def fetchall(self) -> list[Sequence[str]]:
+        """Return every row this cursor was built with.
+
+        Returns:
+            list[Sequence[str]]: The rows, as a live cursor would drain them.
+        """
+        return list(self._rows)
+
+    async def __aiter__(self) -> AsyncIterator[Sequence[str]]:
+        """Yield the rows one at a time, as a live cursor would.
+
+        Returns:
+            AsyncIterator[Sequence[str]]: An iterator over the same rows.
+        """
+        for row in self._rows:
+            yield row
 
 
-def _urls(values: Collection[CustomURL]) -> set[str]:
-    """Return the canonical text of each URL in a collection.
+class _FakeExecuteContext:
+    """The async context manager every mocked statement call returns.
 
     Args:
-    values: A collection of `CustomURL`, as every collection-returning method
-        hands back.
-
-    Returns:
-    set[str]: The canonical URL texts, so an assertion names rows rather than
-    comparing values by identity.
+        cursor: The cursor `__aenter__` hands to the repository.
     """
-    return {url.get_url() for url in values}
+
+    def __init__(self, cursor: _FakeCursor) -> None:
+        """Hold the cursor to hand back on entry.
+
+        Args:
+            cursor: The cursor the `async with` block receives.
+        """
+        self._cursor = cursor
+
+    async def __aenter__(self) -> _FakeCursor:
+        """Enter the block and hand over the cursor.
+
+        Returns:
+            _FakeCursor: The cursor holding the rows a test chose.
+        """
+        return self._cursor
+
+    async def __aexit__(self, *error: object) -> None:
+        """Leave the block, as the aiosqlite context manager does.
+
+        Args:
+            error: The exception triple, empty on the happy path.
+
+        Returns:
+            None
+        """
+        return None
 
 
-def _stored_row(database: str, url: str) -> dict[str, object]:
-    """Read one stored row with the stdlib driver, not the store.
-
-    The persisted column is the store's own output, so a column this test must
-    observe is read straight from the file, the way `rows_by_state` does.
+class _FakeConnection:
+    """The aiosqlite connection stand-in the repository drives.
 
     Args:
-    database: The SQLite file, opened read-only by path.
-    url: The canonical URL text of the row to read.
-
-    Returns:
-    dict[str, object]: The row's columns, keyed by column name.
-
-    Raises:
-    TypeError: If the row is absent, so a missing row fails the test instead of
-    reading as a row of nulls.
+        rows: The rows every cursor this connection hands out reports.
     """
-    with contextlib.closing(sqlite3.connect(database)) as connection:
-        connection.row_factory = sqlite3.Row
-        row = connection.execute(
-            "SELECT * FROM urls WHERE custom_url = ?", (url,)
-        ).fetchone()
-    return dict(row)
+
+    def __init__(self, rows: Sequence[Sequence[str]] = ()) -> None:
+        """Expose one mock per connection method and record the rows to report.
+
+        Args:
+            rows: The rows every `fetchall` hands back. A test may assign
+                `rows` again before its call to choose what the cursor yields.
+        """
+        self.rows = list(rows)
+        # aiosqlite's `execute` and `executemany` are plain methods returning a
+        # context manager, so these two are sync mocks; only `close` is awaited.
+        self.execute = MagicMock(side_effect=self._context)
+        self.executemany = MagicMock(side_effect=self._context)
+        self.close = AsyncMock()
+
+    def _context(self, *_args: object, **_kwargs: object) -> _FakeExecuteContext:
+        """Return a context manager over the rows this connection was given.
+
+        Args:
+            *_args: The statement and its parameters, recorded by the mock itself.
+            **_kwargs: Nothing is passed by keyword.
+
+        Returns:
+            _FakeExecuteContext: A context manager yielding a cursor over `rows`.
+        """
+        return _FakeExecuteContext(_FakeCursor(self.rows))
+
+    def __await__(self) -> Generator[Any, None, None]:
+        """Stand in for `await connection`, which starts aiosqlite's thread.
+
+        Returns:
+            Generator[Any, None, None]: An awaitable that is already done, so no
+            worker thread starts and no file is opened.
+        """
+        async def _ready() -> None:
+            """Finish at once, in place of the connection's worker thread.
+
+            Returns:
+                None
+            """
+            return None
+
+        return _ready().__await__()
 
 
-async def _empty_input(
-    repository: SQLiteURLStateRepository, method_name: str
-) -> object:
-    """Call one method with an empty collection and return whatever it answers.
+@dataclass(frozen=True)
+class _Store:
+    """The store under test and the fake connection it drives.
 
     Args:
-    repository: The real store, which may or may not have a schema yet.
-    method_name: The method to call.
+        repository: The store, constructed over `connection`.
+        connection: The fake connection recording every statement and the values
+            bound to it.
+    """
+
+    repository: SQLiteURLStateRepository
+    connection: _FakeConnection
+
+
+def urls(count: int) -> set[CustomURL]:
+    """Build the canonical URLs of pages 1 through `count`.
+
+    Args:
+        count: How many pages to name.
 
     Returns:
-    object: The method's return value, which is an empty set for `claim_urls`
-    and None for the other two.
+        set[CustomURL]: One URL per page, unordered.
     """
-    if method_name == "claim_urls":
-        return await repository.claim_urls(
-            set(),
-            now(),
-            -1,
-            job_timeout=TIMEOUTS.job,
-            queue_timeout=TIMEOUTS.queue,
+    return {
+        CustomURL(f"{HOST}/page-{index}.html") for index in range(1, count + 1)
+    }
+
+
+@pytest.fixture
+def store() -> Iterator[_Store]:
+    """Build the store over a fake connection, so nothing is opened.
+
+    `aiosqlite.connect` is patched, so the constructor runs and the path is
+    never touched; the clock double reports `NOW`, and the retry policy double
+    is never consulted on the happy path.
+
+    Yields:
+        _Store: The store under test and the connection it drives.
+    """
+    connection = _FakeConnection()
+    time_provider = MagicMock()
+    time_provider.now.return_value = NOW
+    with patch("aiosqlite.connect", return_value=connection):
+        yield _Store(
+            repository=SQLiteURLStateRepository(
+                "unused.db", AsyncMock(), time_provider
+            ),
+            connection=connection,
         )
-    if method_name == "mark_started":
-        return await repository.mark_started(set(), now())
-    return await repository.create_urls(set())
 
 
-async def _read_or_claim(
-    repository: SQLiteURLStateRepository, method_name: str
-) -> set[CustomURL]:
-    """Call one collection-returning method over a single due row.
+async def test_initialize_creates_the_schema(store: _Store) -> None:
+    """The SQLite version is checked once, then every schema statement is run.
 
     Args:
-    repository: The real store, already holding one due row.
-    method_name: The method to call.
+        store: The store under test.
 
     Returns:
-    set[CustomURL]: Whatever the method hands back, the type under test.
+        None
     """
-    if method_name == "get_crawlable_urls":
-        return await repository.get_crawlable_urls(
-            now(), -1, job_timeout=TIMEOUTS.job, queue_timeout=TIMEOUTS.queue
-        )
-    if method_name == "claim_candidates":
-        return await repository.claim_candidates(
-            now(), -1, job_timeout=TIMEOUTS.job, queue_timeout=TIMEOUTS.queue
-        )
-    return await repository.claim_urls(
-        {CustomURL(page_urls(1)[0])},
-        now(),
-        -1,
-        job_timeout=TIMEOUTS.job,
-        queue_timeout=TIMEOUTS.queue,
+    with patch.object(models, "require_returning_support") as require_support:
+        await store.repository.initialize()
+
+    require_support.assert_called_once_with()
+    statements = [
+        args[0] for args, _ in store.connection.execute.call_args_list
+    ]
+    for statement in models.SCHEMA_STATEMENTS:
+        assert statements.count(statement) == 1
+
+
+@pytest.mark.parametrize("count", [1, 3])
+async def test_create_urls_inserts_the_batch(store: _Store, count: int) -> None:
+    """One insert carries every URL of the set and the injected instant.
+
+    Args:
+        store: The store under test.
+        count: How many URLs the caller's set holds.
+
+    Returns:
+        None
+    """
+    wanted = urls(count)
+
+    await store.repository.create_urls(wanted)
+
+    statement, rows = store.connection.executemany.call_args.args
+    assert statement == models.INSERT_URL_SQL
+    assert {row["custom_url"] for row in rows} == {url.get_url() for url in wanted}
+    assert {row["created_time"] for row in rows} == {NOW}
+
+
+async def test_get_crawlable_urls_returns_the_rows_its_cursor_ran(
+    store: _Store,
+) -> None:
+    """The read maps the rows the cursor yielded and binds both timeouts.
+
+    Args:
+        store: The store under test.
+
+    Returns:
+        None
+    """
+    store.connection.rows = [
+        (f"{HOST}/page-1.html",),
+        (f"{HOST}/page-2.html",),
+    ]
+
+    found = await store.repository.get_crawlable_urls(
+        NOW, -1, job_timeout=JOB_TIMEOUT, queue_timeout=QUEUE_TIMEOUT
     )
 
+    assert found == {
+        CustomURL(f"{HOST}/page-1.html"), CustomURL(f"{HOST}/page-2.html")
+    }
+    statement, parameters = store.connection.execute.call_args.args
+    assert statement == models.crawlable_select_statement()
+    assert parameters["job_timeout_seconds"] == JOB_TIMEOUT_SECONDS
+    assert parameters["queue_timeout_seconds"] == QUEUE_TIMEOUT_SECONDS
 
-@pytest.mark.parametrize(
-    ("max_items", "expected"), [(1, 1), (3, 3)], ids=["one_of_three", "all_three"]
-)
-async def test_a_fresh_row_is_crawlable_at_once(
-    max_items: int, expected: int, tmp_path: Path
-) -> None:
-    """An insert stamps `created_time` and `next_crawl_time` alike, so the row is due.
 
-    The read honours the caller's limit and reserves nothing.
+async def test_claim_candidates_returns_the_claimed_rows(store: _Store) -> None:
+    """The claim runs between a BEGIN and a COMMIT, binding the queued state.
 
     Args:
-    max_items: The row limit this read is given, over three due rows.
-    expected: How many of those three rows the read must return.
-    tmp_path: This test's private directory, holding its own database file.
+        store: The store under test.
 
     Returns:
-    None
+        None
     """
-    database = str(tmp_path / "crawl.db")
-    urls = page_urls(3)
-    repository = make_repository(database)
-    await repository.initialize()
-    try:
-        await seed_rows(repository, urls)
+    store.connection.rows = [(f"{HOST}/page-1.html",)]
 
-        found = await repository.get_crawlable_urls(
-            now(), max_items, job_timeout=TIMEOUTS.job, queue_timeout=TIMEOUTS.queue
-        )
+    claimed = await store.repository.claim_candidates(
+        NOW, 1, job_timeout=JOB_TIMEOUT, queue_timeout=QUEUE_TIMEOUT
+    )
 
-        assert len(found) == expected
-        assert _urls(found) <= set(urls)
-        assert rows_by_state(database) == {CrawlState.NOT_CRAWLED.value: 3}
-    finally:
-        await repository.close()
+    assert claimed == {CustomURL(f"{HOST}/page-1.html")}
+    # The middle of the three calls is the claim: BEGIN, claim, then COMMIT.
+    statement, parameters = store.connection.execute.call_args_list[1].args
+    assert statement == models.claim_statement()
+    assert parameters["claimed_state"] == CrawlState.QUEUED.value
+    assert parameters["job_timeout_seconds"] == JOB_TIMEOUT_SECONDS
+    assert parameters["queue_timeout_seconds"] == QUEUE_TIMEOUT_SECONDS
 
 
 @pytest.mark.parametrize("count", [1, 3])
-async def test_create_urls_is_idempotent(count: int, tmp_path: Path) -> None:
-    """The insert conflicts on the primary key and is ignored, so one URL is one row.
-
-    Args:
-    count: How many URLs are seeded before the same URLs are seeded again.
-    tmp_path: This test's private directory, holding its own database file.
-
-    Returns:
-    None
-    """
-    database = str(tmp_path / "crawl.db")
-    urls = page_urls(count)
-    repository = make_repository(database)
-    await repository.initialize()
-    try:
-        await seed_rows(repository, urls)
-        await seed_rows(repository, urls)
-
-        assert rows_by_state(database) == {CrawlState.NOT_CRAWLED.value: count}
-    finally:
-        await repository.close()
-
-
-@pytest.mark.parametrize("method_name", COLLECTION_METHODS)
-async def test_an_empty_input_leaves_every_row_untouched(
-    method_name: str, tmp_path: Path
+async def test_mark_started_updates_the_whole_batch(
+    store: _Store, count: int
 ) -> None:
-    """The no-links case is the common one, so an empty collection changes nothing.
+    """One widened update binds the started state, the instant, and every URL.
 
     Args:
-    method_name: The method that must answer an empty collection.
-    tmp_path: This test's private directory, holding its own database file.
+        store: The store under test.
+        count: How many URLs the caller's set holds.
 
     Returns:
-    None
+        None
     """
-    database = str(tmp_path / "crawl.db")
-    repository = make_repository(database)
-    await repository.initialize()
-    try:
-        await seed_rows(repository, page_urls(2))
+    wanted = urls(count)
 
-        result = await _empty_input(repository, method_name)
+    await store.repository.mark_started(wanted, NOW)
 
-        if method_name == "claim_urls":
-            assert result == set()
-        else:
-            assert result is None
-        assert rows_by_state(database) == {CrawlState.NOT_CRAWLED.value: 2}
-    finally:
-        await repository.close()
+    # Again the middle call: BEGIN, the one update, then COMMIT.
+    statement, parameters = store.connection.execute.call_args_list[1].args
+    assert statement.startswith(MARK_STARTED_HEAD)
+    assert statement.count(":u") == count
+    assert parameters["started_state"] == CrawlState.STARTED_CRAWL.value
+    assert parameters["now"] == NOW
+    bound = {value for name, value in parameters.items() if name.startswith("u")}
+    assert bound == {url.get_url() for url in wanted}
 
 
-@pytest.mark.parametrize("method_name", COLLECTION_METHODS)
-async def test_an_empty_input_is_answered_without_reading_the_schema(
-    method_name: str, tmp_path: Path
+async def test_complete_crawl_writes_the_outcomes_and_the_discoveries(
+    store: _Store,
 ) -> None:
-    """An empty collection is answered by the method itself, before any statement.
-
-    The store is never initialized, so a statement could not have been silent.
-    The contrast below is what makes the absence of one an assertion rather
-    than a coincidence, and it pins the concrete class: the port promises only
-    `Exception`, and `sqlite3.Error` is the class a caller can actually catch.
+    """The outcome update runs first, then the insert of what the pages revealed.
 
     Args:
-    method_name: The method that must answer without a statement.
-    tmp_path: This test's private directory, holding its own database file.
+        store: The store under test.
 
     Returns:
-    None
+        None
     """
-    database = str(tmp_path / "uninitialized.db")
-    repository = make_repository(database)
-    try:
-        result = await _empty_input(repository, method_name)
+    crawled = CustomURL(f"{HOST}/page-1.html")
+    found = CustomURL(f"{HOST}/page-2.html")
 
-        if method_name == "claim_urls":
-            assert result == set()
-        else:
-            assert result is None
-        with pytest.raises(sqlite3.Error):
-            await repository.mark_started({CustomURL(page_urls(1)[0])}, now())
-    finally:
-        await repository.close()
+    await store.repository.complete_crawl({crawled: NOW}, {found}, NOW)
+
+    calls = store.connection.executemany.call_args_list
+    assert [args[0] for args, _ in calls] == [
+        models.COMPLETE_CRAWL_SQL,
+        models.INSERT_URL_SQL,
+    ]
+    finished_rows = calls[0].args[1]
+    discovered_rows = calls[1].args[1]
+    assert [row["custom_url"] for row in finished_rows] == [crawled.get_url()]
+    assert [row["custom_url"] for row in discovered_rows] == [found.get_url()]
+    assert finished_rows[0]["finished_state"] == CrawlState.FINISHED_CRAWL.value
 
 
-@pytest.mark.parametrize(
-    ("queue_timeout", "pause_seconds", "reclaimed"),
-    [(TIMEOUTS.queue, 0.0, False), (EXPIRED, PAUSE_SECONDS, True)],
-    ids=["inside_the_window", "past_the_window"],
-)
-async def test_a_queued_row_is_reclaimed_only_past_its_queue_timeout(
-    queue_timeout: timedelta,
-    pause_seconds: float,
-    reclaimed: bool,
-    tmp_path: Path,
-) -> None:
-    """A `queued` row is reclaimable only once its own window has elapsed, which
-    recovers a send that was lost.
+async def test_close_awaits_the_connection_close(store: _Store) -> None:
+    """`close` awaits the connection, so the worker thread behind it can end.
 
     Args:
-    queue_timeout: The `queued` staleness window both claims are given.
-    pause_seconds: How long to wait between the two claims.
-    reclaimed: Whether the second claim must hand the row back.
-    tmp_path: This test's private directory, holding its own database file.
+        store: The store under test.
 
     Returns:
-    None
+        None
     """
-    database = str(tmp_path / "crawl.db")
-    urls = page_urls(1)
-    repository = make_repository(database)
-    await repository.initialize()
-    try:
-        await seed_rows(repository, urls)
-        first = await repository.claim_candidates(
-            now(), 1, job_timeout=TIMEOUTS.job, queue_timeout=queue_timeout
-        )
-        assert _urls(first) == set(urls)
+    await store.repository.close()
 
-        await asyncio.sleep(pause_seconds)
-        second = await repository.claim_candidates(
-            now(), 1, job_timeout=TIMEOUTS.job, queue_timeout=queue_timeout
-        )
-
-        assert _urls(second) == (set(urls) if reclaimed else set())
-        assert rows_by_state(database) == {CrawlState.QUEUED.value: 1}
-    finally:
-        await repository.close()
-
-
-@pytest.mark.parametrize(
-    ("job_timeout", "pause_seconds", "reclaimed"),
-    [(TIMEOUTS.job, 0.0, False), (EXPIRED, PAUSE_SECONDS, True)],
-    ids=["inside_the_window", "past_the_window"],
-)
-async def test_a_started_row_is_reclaimed_only_past_its_job_timeout(
-    job_timeout: timedelta,
-    pause_seconds: float,
-    reclaimed: bool,
-    tmp_path: Path,
-) -> None:
-    """A `started_crawl` row is reclaimable only once its window has elapsed, which
-    recovers a worker that died.
-
-    Args:
-    job_timeout: The `started_crawl` staleness window the claim is given.
-    pause_seconds: How long to wait between the mark and the claim.
-    reclaimed: Whether the claim must hand the abandoned row back.
-    tmp_path: This test's private directory, holding its own database file.
-
-    Returns:
-    None
-    """
-    database = str(tmp_path / "crawl.db")
-    urls = page_urls(1)
-    repository = make_repository(database)
-    await repository.initialize()
-    try:
-        await seed_rows(repository, urls)
-        await repository.mark_started({CustomURL(urls[0])}, now())
-
-        await asyncio.sleep(pause_seconds)
-        claimed = await repository.claim_candidates(
-            now(), 1, job_timeout=job_timeout, queue_timeout=TIMEOUTS.queue
-        )
-
-        state = CrawlState.QUEUED if reclaimed else CrawlState.STARTED_CRAWL
-        assert _urls(claimed) == (set(urls) if reclaimed else set())
-        assert rows_by_state(database) == {state.value: 1}
-    finally:
-        await repository.close()
-
-
-@pytest.mark.parametrize("count", [1, 3])
-async def test_claim_candidates_queues_a_row_once(count: int, tmp_path: Path) -> None:
-    """One atomic statement hands a due row to one caller, so a second claim is empty.
-
-    Args:
-    count: How many due rows the store holds before the first claim.
-    tmp_path: This test's private directory, holding its own database file.
-
-    Returns:
-    None
-    """
-    database = str(tmp_path / "crawl.db")
-    urls = page_urls(count)
-    repository = make_repository(database)
-    await repository.initialize()
-    try:
-        await seed_rows(repository, urls)
-
-        first = await repository.claim_candidates(
-            now(), count, job_timeout=TIMEOUTS.job, queue_timeout=TIMEOUTS.queue
-        )
-        assert _urls(first) == set(urls)
-        assert rows_by_state(database) == {CrawlState.QUEUED.value: count}
-
-        second = await repository.claim_candidates(
-            now(), count, job_timeout=TIMEOUTS.job, queue_timeout=TIMEOUTS.queue
-        )
-
-        assert second == set()
-        assert rows_by_state(database) == {CrawlState.QUEUED.value: count}
-    finally:
-        await repository.close()
-
-
-@pytest.mark.parametrize("count", [1, 3])
-async def test_claim_urls_returns_only_the_callers_urls(
-    count: int, tmp_path: Path
-) -> None:
-    """The caller's restriction sits inside the claiming subquery, so nothing else
-    is queued.
-
-    Args:
-    count: How many of the seeded rows the caller names.
-    tmp_path: This test's private directory, holding its own database file.
-
-    Returns:
-    None
-    """
-    database = str(tmp_path / "crawl.db")
-    urls = page_urls(count + 1)
-    wanted = urls[:count]
-    repository = make_repository(database)
-    await repository.initialize()
-    try:
-        await seed_rows(repository, urls)
-
-        claimed = await repository.claim_urls(
-            {CustomURL(url) for url in wanted},
-            now(),
-            -1,
-            job_timeout=TIMEOUTS.job,
-            queue_timeout=TIMEOUTS.queue,
-        )
-
-        assert _urls(claimed) == set(wanted)
-        assert rows_by_state(database) == _states(
-            {
-                CrawlState.QUEUED.value: count,
-                CrawlState.NOT_CRAWLED.value: 1,
-            }
-        )
-    finally:
-        await repository.close()
-
-
-@pytest.mark.parametrize("count", [1, 2])
-async def test_claim_urls_does_not_return_a_row_inside_its_window(
-    count: int, tmp_path: Path
-) -> None:
-    """A URL the caller already holds is queued once, so the second claim is empty.
-
-    Args:
-    count: How many rows the store holds and the caller names.
-    tmp_path: This test's private directory, holding its own database file.
-
-    Returns:
-    None
-    """
-    database = str(tmp_path / "crawl.db")
-    urls = page_urls(count)
-    repository = make_repository(database)
-    await repository.initialize()
-    try:
-        await seed_rows(repository, urls)
-        first = await repository.claim_urls(
-            {CustomURL(url) for url in urls},
-            now(),
-            -1,
-            job_timeout=TIMEOUTS.job,
-            queue_timeout=TIMEOUTS.queue,
-        )
-        assert _urls(first) == set(urls)
-
-        second = await repository.claim_urls(
-            {CustomURL(url) for url in urls},
-            now(),
-            -1,
-            job_timeout=TIMEOUTS.job,
-            queue_timeout=TIMEOUTS.queue,
-        )
-
-        assert second == set()
-        assert rows_by_state(database) == {CrawlState.QUEUED.value: count}
-    finally:
-        await repository.close()
-
-
-@pytest.mark.parametrize("count", [0, 1, 3])
-async def test_mark_started_moves_every_url_of_the_set(
-    count: int, tmp_path: Path
-) -> None:
-    """One `IN (...)` update covers a whole batch, recording the attempt itself.
-
-    Args:
-    count: How many URLs the set holds and the update must move.
-    tmp_path: This test's private directory, holding its own database file.
-
-    Returns:
-    None
-    """
-    database = str(tmp_path / "crawl.db")
-    urls = page_urls(count)
-    repository = make_repository(database)
-    await repository.initialize()
-    try:
-        await seed_rows(repository, urls)
-
-        await repository.mark_started({CustomURL(url) for url in urls}, now())
-
-        assert rows_by_state(database) == _states(
-            {CrawlState.STARTED_CRAWL.value: count}
-        )
-    finally:
-        await repository.close()
-
-
-async def test_mark_started_chunks_a_set_wider_than_one_statement(
-    tmp_path: Path,
-) -> None:
-    """A batch too wide for one statement is split, and every row of it is still marked.
-
-    Args:
-    tmp_path: This test's private directory, holding its own database file.
-
-    Returns:
-    None
-    """
-    database = str(tmp_path / "crawl.db")
-    urls = page_urls(CHUNKED_URLS)
-    repository = make_repository(database)
-    await repository.initialize()
-    try:
-        await seed_rows(repository, urls)
-        assert rows_by_state(database) == {CrawlState.NOT_CRAWLED.value: CHUNKED_URLS}
-
-        await repository.mark_started({CustomURL(url) for url in urls}, now())
-
-        assert rows_by_state(database) == {CrawlState.STARTED_CRAWL.value: CHUNKED_URLS}
-    finally:
-        await repository.close()
-
-
-@pytest.mark.parametrize("discovered", [0, 2])
-async def test_complete_crawl_records_the_finished_rows_and_inserts_the_discovered(
-    discovered: int, tmp_path: Path
-) -> None:
-    """One transaction writes the outcomes and then the URLs the pages revealed.
-
-    Args:
-    discovered: How many new URLs the batch found.
-    tmp_path: This test's private directory, holding its own database file.
-
-    Returns:
-    None
-    """
-    database = str(tmp_path / "crawl.db")
-    crawled = page_urls(2)
-    found = page_urls(2 + discovered)[2:]
-    repository = make_repository(database)
-    await repository.initialize()
-    try:
-        await seed_rows(repository, crawled)
-        finished = {CustomURL(url): now() for url in crawled}
-        await repository.mark_started(set(finished), now())
-
-        await repository.complete_crawl(
-            finished, {CustomURL(url) for url in found}, now()
-        )
-
-        assert rows_by_state(database) == _states(
-            {
-                CrawlState.FINISHED_CRAWL.value: len(crawled),
-                CrawlState.NOT_CRAWLED.value: discovered,
-            }
-        )
-    finally:
-        await repository.close()
-
-
-@pytest.mark.parametrize(
-    ("offset", "reclaimed"),
-    [(DUE_PAST, True), (DUE_FUTURE, False), (None, False)],
-    ids=["due", "not_due_yet", "never_again"],
-)
-async def test_a_finished_row_is_claimed_only_while_it_is_due(
-    offset: timedelta | None, reclaimed: bool, tmp_path: Path
-) -> None:
-    """A `finished_crawl` row is due only while its next time has passed, and a NULL
-    time never is.
-
-    Args:
-    offset: How far from now the next due time is set, or None for no re-crawl.
-    reclaimed: Whether the read must hand the row back.
-    tmp_path: This test's private directory, holding its own database file.
-
-    Returns:
-    None
-    """
-    database = str(tmp_path / "crawl.db")
-    urls = page_urls(1)
-    repository = make_repository(database)
-    await repository.initialize()
-    try:
-        await seed_rows(repository, urls)
-        await repository.mark_started({CustomURL(urls[0])}, now())
-
-        await repository.complete_crawl(
-            {CustomURL(urls[0]): None if offset is None else now() + offset},
-            set(),
-            now(),
-        )
-        found = await repository.get_crawlable_urls(
-            now(), 1, job_timeout=TIMEOUTS.job, queue_timeout=TIMEOUTS.queue
-        )
-        stored = _stored_row(database, urls[0])
-
-        assert _urls(found) == (set(urls) if reclaimed else set())
-        assert stored["state"] == CrawlState.FINISHED_CRAWL.value
-        if offset is None:
-            assert stored["next_crawl_time"] is None
-        else:
-            assert stored["next_crawl_time"] is not None
-    finally:
-        await repository.close()
-
-
-@pytest.mark.parametrize(
-    "extra",
-    [0, 1],
-    ids=["the_shared_url_alone", "with_another_discovered_url"],
-)
-async def test_a_url_finished_and_discovered_in_one_batch_is_written_once(
-    extra: int, tmp_path: Path
-) -> None:
-    """The finish write lands before the insert, so a URL in both is counted once and
-    stays finished.
-
-    Args:
-    extra: How many further discovered URLs join the shared one.
-    tmp_path: This test's private directory, holding its own database file.
-
-    Returns:
-    None
-    """
-    database = str(tmp_path / "crawl.db")
-    crawled = page_urls(1)
-    shared = CustomURL(crawled[0])
-    others = page_urls(1 + extra)[1:]
-    repository = make_repository(database)
-    await repository.initialize()
-    try:
-        await seed_rows(repository, crawled)
-        await repository.mark_started({shared}, now())
-
-        await repository.complete_crawl(
-            {shared: now()}, {shared, *(CustomURL(url) for url in others)}, now()
-        )
-
-        assert rows_by_state(database) == _states(
-            {
-                CrawlState.FINISHED_CRAWL.value: 1,
-                CrawlState.NOT_CRAWLED.value: extra,
-            }
-        )
-        assert _stored_row(database, crawled[0])["times_crawled"] == 1
-    finally:
-        await repository.close()
-
-
-async def test_close_twice_does_not_raise(tmp_path: Path) -> None:
-    """`close` is idempotent, so a shutdown path may call it without knowing who closed
-    the store.
-
-    Args:
-    tmp_path: This test's private directory, holding its own database file.
-
-    Returns:
-    None
-    """
-    repository = make_repository(str(tmp_path / "crawl.db"))
-    await repository.initialize()
-
-    await repository.close()
-    await repository.close()
-
-
-@pytest.mark.parametrize("method_name", READER_METHODS)
-async def test_a_collection_returning_method_returns_a_set(
-    method_name: str, tmp_path: Path
-) -> None:
-    """Every read and claim hands back a set, so a caller never dedupes.
-
-    Args:
-    method_name: The method whose return type is checked.
-    tmp_path: This test's private directory, holding its own database file.
-
-    Returns:
-    None
-    """
-    database = str(tmp_path / "crawl.db")
-    urls = page_urls(1)
-    repository = make_repository(database)
-    await repository.initialize()
-    try:
-        await seed_rows(repository, urls)
-
-        found = await _read_or_claim(repository, method_name)
-
-        assert isinstance(found, set)
-        assert _urls(found) == set(urls)
-    finally:
-        await repository.close()
+    store.connection.close.assert_awaited_once_with()

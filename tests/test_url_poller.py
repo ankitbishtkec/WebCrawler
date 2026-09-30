@@ -1,289 +1,141 @@
-"""Tests for `URLPoller`, the producer half of the crawl loop.
+"""Unit tests for `URLPoller`, the producer half of the crawl loop.
 
-Every poller here is the real one over the real store and the real queue, so
-only the staleness windows are shortened, to milliseconds rather than to seconds.
+The store and the producer are mocks, so each test only asks which claim the
+poller made and which messages it fed. `run` never returns, so the happy path
+is driven through `queue_candidates`, the one public call that polls.
 """
 
-import asyncio
-import contextlib
-import inspect
-from collections.abc import Callable
-from datetime import timedelta
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
+from unittest.mock import MagicMock
 
 import pytest
 
-from tests.support import (
-    HOST,
-    TIMEOUTS,
-    make_poller,
-    make_producer,
-    make_queue,
-    make_repository,
-    now,
-    page_urls,
-    queued_texts,
-    rows_by_state,
-    seed_rows,
-)
 from webcrawler.application.url_poller import URLPoller
-from webcrawler.domain.crawl_state import CrawlState
 from webcrawler.domain.custom_url import CustomURL
+from webcrawler.domain.messages import BaseMessage
+from webcrawler.ports.time_provider import TimeProviderFactory
+from webcrawler.ports.topic_producer import TopicProducer
+from webcrawler.ports.url_state_repository import URLStateRepository
 
-# Under a second encodes to zero whole seconds, which is how the predicate reads
-# it, so a `queued` row is already past its own window.
-EXPIRED: timedelta = timedelta(milliseconds=1)
+HOST: str = "https://crawlme.monzo.com"
 
-# Short enough that a cancelled poll has already polled, long enough not to spin.
-POLL_SECONDS: float = 0.005
+# The instant the pinned clock hands the poller, so the claim is predictable.
+NOW: datetime = datetime(2026, 9, 29, 6, 0, tzinfo=timezone.utc)
 
-# How long a drive keeps yielding before it cancels the loop anyway.
-DEADLINE_SECONDS: float = 2.0
+# The two staleness windows the poller was configured with.
+JOB_TIMEOUT: timedelta = timedelta(minutes=1)
+QUEUE_TIMEOUT: timedelta = timedelta(seconds=30)
 
-# The dedupe key the public APIs require; nothing reads it in memory.
+# The caller's dedupe key, forwarded to the queue untouched.
 REQUEST_ID: str = "test-request"
 
+# The row limit one call is given, checked against the store's own claim.
+MAX_ITEMS: int = 7
 
-def _states(states: dict[str, int]) -> dict[str, int]:
-    """Drop the states a count of zero means are absent from the table.
+
+def _claimed(count: int) -> set[CustomURL]:
+    """Return the `count` URLs the mocked store hands back from a claim.
 
     Args:
-    states: The count each state must hold, zero meaning the state is absent.
+    count: How many rows the claim returned.
 
     Returns:
-    dict[str, int]: The non-zero counts, which is the shape `rows_by_state` reports.
+    set[CustomURL]: The claimed URLs, the one set the poller and the test both read.
     """
-    return {state: count for state, count in states.items() if count}
+    return {CustomURL(f"{HOST}/page-{index}.html") for index in range(1, count + 1)}
 
 
-async def _poll_until(poller: URLPoller, done: Callable[[], bool]) -> None:
-    """Run the poller's own loop until the condition holds, then cancel it.
+class _Built(NamedTuple):
+    """The poller under test, with the mocked store and producer behind it.
 
     Args:
-    poller: The poller whose `run` is driven.
-    done: The condition that ends the drive, checked between yields.
+    poller: The poller, built over a mock store and a mock producer.
+    repository: The mocked crawl state store.
+    producer: The mocked queue write side.
+    claimed: The rows the mocked store returns from every claim.
+    """
+
+    poller: URLPoller
+    repository: MagicMock
+    producer: MagicMock
+    claimed: set[CustomURL]
+
+
+def _build_poller(claimed: set[CustomURL]) -> _Built:
+    """Build the poller over mocks, with `claimed` waiting to be fed.
+
+    Args:
+    claimed: The rows every claim returns, an empty set for a poll that found nothing.
 
     Returns:
-    None
+    _Built: The poller and the two mocks to assert on.
     """
-    task = asyncio.create_task(poller.run())
-    deadline = asyncio.get_running_loop().time() + DEADLINE_SECONDS
-    try:
-        while not done() and asyncio.get_running_loop().time() < deadline:
-            await asyncio.sleep(POLL_SECONDS)
-    finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+    repository = MagicMock(spec=URLStateRepository)
+    repository.claim_candidates.return_value = claimed
+    producer = MagicMock(spec=TopicProducer)
+    producer.enqueue_many.return_value = [True] * len(claimed)
+    clock = MagicMock(spec=TimeProviderFactory)
+    clock.now.return_value = NOW
+
+    poller = URLPoller(
+        repository,
+        producer,
+        job_timeout=JOB_TIMEOUT,
+        queue_timeout=QUEUE_TIMEOUT,
+        time_provider=clock,
+    )
+    return _Built(poller, repository, producer, claimed)
 
 
-@pytest.mark.parametrize("count", [1, 3])
-async def test_enqueue_urls_puts_the_callers_rows_on_the_queue(
-    count: int, tmp_path: Path
-) -> None:
-    """A caller's own rows are claimed and fed, one message each.
+@pytest.mark.parametrize("count", [0, 2])
+async def test_the_claimed_urls_are_fed_as_one_message_each(count: int) -> None:
+    """One bulk call carries one message per claimed URL, under the caller's key.
 
     Args:
-    count: How many rows the caller names.
-    tmp_path: This test's private directory, holding its own database file.
-
-    Returns:
-    None
-    """
-    database = str(tmp_path / "crawl.db")
-    urls = page_urls(count)
-    repository = make_repository(database)
-    await repository.initialize()
-    queue = make_queue()
-    try:
-        await seed_rows(repository, urls)
-        poller = make_poller(repository, make_producer(queue))
-
-        await poller.enqueue_urls([CustomURL(url) for url in urls])
-
-        # `claim_urls` takes a set and returns a set, so the queue order is the
-        # claim's order and not the caller's; the fact under test is the same
-        # rows, once each.
-        assert set(queued_texts(queue)) == set(urls)
-        assert rows_by_state(database) == {CrawlState.QUEUED.value: count}
-    finally:
-        await repository.close()
-
-
-@pytest.mark.parametrize("count", [1, 2])
-async def test_a_url_that_is_not_a_row_is_never_queued(
-    count: int, tmp_path: Path
-) -> None:
-    """The claim only ever targets rows the store holds, so it queues nothing.
-
-    Args:
-    count: How many unknown URLs the caller names.
-    tmp_path: This test's private directory, holding its own database file.
+    count: How many rows the claim returned.
 
     Returns:
     None
     """
-    database = str(tmp_path / "crawl.db")
-    unknown = [f"{HOST}/never-seen-{index}.html" for index in range(1, count + 1)]
-    repository = make_repository(database)
-    await repository.initialize()
-    queue = make_queue()
-    try:
-        await seed_rows(repository, page_urls(1))
-        poller = make_poller(repository, make_producer(queue))
+    claimed = _claimed(count)
+    built = _build_poller(claimed)
 
-        await poller.enqueue_urls([CustomURL(url) for url in unknown])
+    await built.poller.queue_candidates(NOW, REQUEST_ID)
 
-        assert queued_texts(queue) == []
-        assert rows_by_state(database) == {CrawlState.NOT_CRAWLED.value: 1}
-    finally:
-        await repository.close()
+    built.producer.enqueue_many.assert_awaited_once_with(
+        [BaseMessage(url, partition_key=hash(url)) for url in claimed], REQUEST_ID
+    )
 
 
-@pytest.mark.parametrize("seeded", [0, 2])
-async def test_an_empty_list_queues_nothing(seeded: int, tmp_path: Path) -> None:
-    """The no-links case is a no-op, so the rows it holds stay claimable.
-
-    Args:
-    seeded: How many rows the store holds before the call.
-    tmp_path: This test's private directory, holding its own database file.
+async def test_every_message_is_routed_by_the_hash_of_its_own_url() -> None:
+    """`partition_key` is `hash(url)`, the value the producer stores verbatim.
 
     Returns:
     None
     """
-    database = str(tmp_path / "crawl.db")
-    repository = make_repository(database)
-    await repository.initialize()
-    queue = make_queue()
-    try:
-        await seed_rows(repository, page_urls(seeded))
-        poller = make_poller(repository, make_producer(queue))
+    claimed = _claimed(2)
+    built = _build_poller(claimed)
 
-        await poller.enqueue_urls([])
+    await built.poller.queue_candidates(NOW, REQUEST_ID)
 
-        assert queued_texts(queue) == []
-        assert rows_by_state(database) == _states(
-            {CrawlState.NOT_CRAWLED.value: seeded}
-        )
-    finally:
-        await repository.close()
+    built.producer.enqueue_many.assert_awaited_once()
+    messages = built.producer.enqueue_many.await_args.args[0]
+    assert [message.partition_key for message in messages] == [
+        hash(url) for url in claimed
+    ]
 
 
-@pytest.mark.parametrize("max_items", [1, 2, 5])
-async def test_queue_candidates_claims_no_more_than_it_is_asked_for(
-    max_items: int, tmp_path: Path
-) -> None:
-    """The caller's limit reaches the store, so no surplus row is fed.
-
-    Args:
-    max_items: The row limit this call is given, over five due rows.
-    tmp_path: This test's private directory, holding its own database file.
+async def test_the_claim_is_asked_for_with_the_configured_timeouts_and_limit() -> None:
+    """The store's claim gets the instant, the row limit, and both windows.
 
     Returns:
     None
     """
-    database = str(tmp_path / "crawl.db")
-    seeded = 5
-    repository = make_repository(database)
-    await repository.initialize()
-    queue = make_queue()
-    try:
-        await seed_rows(repository, page_urls(seeded))
-        poller = make_poller(repository, make_producer(queue))
+    built = _build_poller(_claimed(1))
 
-        await poller.queue_candidates(now(), REQUEST_ID, max_items)
+    await built.poller.queue_candidates(NOW, REQUEST_ID, MAX_ITEMS)
 
-        assert len(queued_texts(queue)) == max_items
-        assert rows_by_state(database) == _states(
-            {
-                CrawlState.QUEUED.value: max_items,
-                CrawlState.NOT_CRAWLED.value: seeded - max_items,
-            }
-        )
-    finally:
-        await repository.close()
-
-
-@pytest.mark.parametrize(
-    ("queue_timeout", "pause_seconds", "claimed"),
-    [(TIMEOUTS.queue, 0.0, 1), (EXPIRED, 0.01, 2)],
-    ids=["inside_the_window", "past_the_window"],
-)
-async def test_a_queued_row_is_reclaimed_only_past_its_queue_timeout(
-    queue_timeout: timedelta, pause_seconds: float, claimed: int, tmp_path: Path
-) -> None:
-    """A second claim takes the row only once its own window has elapsed.
-
-    Args:
-    queue_timeout: The `queued` staleness window both claims are given.
-    pause_seconds: How long to wait between the two claims.
-    claimed: How many messages the queue must hold afterwards, the first claim
-        plus any re-claim.
-    tmp_path: This test's private directory, holding its own database file.
-
-    Returns:
-    None
-    """
-    database = str(tmp_path / "crawl.db")
-    repository = make_repository(database)
-    await repository.initialize()
-    queue = make_queue()
-    try:
-        await seed_rows(repository, page_urls(1))
-        poller = make_poller(
-            repository, make_producer(queue), queue_timeout=queue_timeout
-        )
-        await poller.enqueue_urls([CustomURL(page_urls(1)[0])])
-        assert len(queued_texts(queue)) == 1
-
-        await asyncio.sleep(pause_seconds)
-        await poller.queue_candidates(now(), REQUEST_ID)
-
-        assert len(queued_texts(queue)) == claimed
-    finally:
-        await repository.close()
-
-
-async def test_run_polls_due_rows_onto_the_queue(tmp_path: Path) -> None:
-    """The poll loop feeds the queue without the caller driving a schedule.
-
-    Args:
-    tmp_path: This test's private directory, holding its own database file.
-
-    Returns:
-    None
-    """
-    database = str(tmp_path / "crawl.db")
-    urls = page_urls(2)
-    repository = make_repository(database)
-    await repository.initialize()
-    queue = make_queue()
-    try:
-        await seed_rows(repository, urls)
-        poller = make_poller(
-            repository,
-            make_producer(queue),
-            periodic_fetch_seconds=POLL_SECONDS,
-        )
-
-        await _poll_until(poller, lambda: len(queued_texts(queue)) == 2)
-
-        assert sorted(queued_texts(queue)) == sorted(urls)
-        assert rows_by_state(database) == {CrawlState.QUEUED.value: 2}
-    finally:
-        await repository.close()
-
-
-@pytest.mark.parametrize("name", ["retry_policy", "logger"])
-async def test_the_poller_takes_neither_a_retry_policy_nor_a_logger(
-    name: str,
-) -> None:
-    """The store owns its retries and every class logs for itself.
-
-    Args:
-    name: The constructor parameter that must be absent.
-
-    Returns:
-    None
-    """
-    assert name not in inspect.signature(URLPoller.__init__).parameters
+    built.repository.claim_candidates.assert_awaited_once_with(
+        NOW, MAX_ITEMS, job_timeout=JOB_TIMEOUT, queue_timeout=QUEUE_TIMEOUT
+    )
