@@ -42,7 +42,9 @@ from webcrawler.utils.logger import configure_logging
 LOG_LEVEL: int = logging.INFO
 DB_FILE: str = "webcrawler.db"
 BATCH_SIZE: int = 50
-JOB_TIMEOUT: timedelta = timedelta(minutes=1)
+# Must exceed the fetcher's whole retry budget, three attempts of 12s plus up
+# to 25s of backoff, or a URL still retrying is re-claimed and fetched twice.
+JOB_TIMEOUT: timedelta = timedelta(minutes=2)
 QUEUE_TIMEOUT: timedelta = timedelta(seconds=30)
 # A failed URL waits this long before it is due again, so a site that is
 # rate limiting the crawl gets a quiet window instead of one burst a minute.
