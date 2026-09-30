@@ -1,8 +1,23 @@
 ---
 title: WebCrawler UML
 ---
-%% Render with any Mermaid 10+ renderer, e.g. paste into mermaid.live or the
-%% GitHub preview.
+%% This is the editable source of the diagram in README.md, which carries the
+%% same text inside a ```mermaid fence. Edit this file, then copy the block
+%% into the README; the two are the same text and must not drift.
+%%
+%% How to view it:
+%%   - GitHub: open this file and it renders in the built-in preview; so does
+%%     the fenced copy in README.md.
+%%   - VS Code: the stock Markdown preview does NOT render Mermaid. Install the
+%%     "Markdown Preview Mermaid Support" extension (MarkdownAll), or run
+%%     "Markdown: Open Preview to the Side" with it enabled.
+%%   - Obsidian, GitLab, mkdocs-material, Docusaurus: rendered already, no setup.
+%%   - Anything else: paste the block into https://mermaid.live
+%%   - To a PNG instead, from the project root, with Chrome already installed:
+%%       npx -y @mermaid-js/mermaid-cli -i docs/uml.mmd -o docs/uml.png \
+%%         -b white -s 2 -p docs/puppeteer.json
+%%     (docs/puppeteer.json points the renderer at your Chrome, because
+%%     puppeteer's postinstall may be blocked and there is no bundled Chromium.)
 %%
 %% Container types are written with Mermaid generics (`set~CustomURL~`) so that
 %% `[` never reads as a class-label delimiter. Note the YAML front matter below
