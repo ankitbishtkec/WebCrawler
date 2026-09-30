@@ -1,4 +1,4 @@
-"""The crawl worker, the consumer half of the crawl loop, with buffered writes.
+"""The crawl worker, the consumer half of the crawl loop, behind `CrawlWorker`.
 
 It peeks a batch, detaches one crawl task per message, commits the batch at once,
 and returns to the queue, so the fetcher is given more work without waiting on
@@ -16,6 +16,7 @@ from webcrawler.domain.base_result import BaseResult
 from webcrawler.domain.custom_url import CustomURL
 from webcrawler.domain.messages import BaseMessage
 from webcrawler.ports.crawl_queuer import CrawlQueuer
+from webcrawler.ports.crawl_worker import CrawlWorker
 from webcrawler.ports.link_extractor import LinkExtractor
 from webcrawler.ports.politeness_policy import PolitenessPolicy
 from webcrawler.ports.time_provider import TimeProviderFactory
@@ -31,8 +32,11 @@ DEFAULT_MAX_CONCURRENT_FETCHES: int = 500
 DEFAULT_FLUSH_INTERVAL_SECONDS: float = 0.5
 
 
-class CrawlerWorkerV1:
+class CrawlerWorkerV1(CrawlWorker):
     """Consumes the crawl queue forever, writing the store in flush windows.
+
+    The `CrawlWorker` that does not wait for its batch; `CrawlerWorker` in
+    `application/worker.py` is the other one, and `main.py` picks either.
 
     Why prefer this worker ? `CrawlerWorker` picks a batch of URLs and waits for every
     one of them before it picks up new work, so a single slow site leaves the

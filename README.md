@@ -38,16 +38,16 @@ worthless as a design document.
 
 | # | Requirement | Status |
 |---|---|---|
-| NFR1 | **Concurrent.** Many pages are fetched at once, not one after another. | Met. One `asyncio.TaskGroup` per batch fetches all 50 messages of a batch together on a single event loop. |
+| NFR1 | **Concurrent.** Many pages are fetched at once, not one after another. | Met. `CrawlerWorker` fetches all 50 messages of a batch in one `asyncio.TaskGroup`; `CrawlerWorkerV1` detaches a crawl per message and holds up to 500 fetches in flight. Both on a single event loop. |
 | NFR2 | **Fetch fairly, without saturating the host.** Do not hammer a site. | **Not met.** The shipped `NoOpPolitenessPolicy` answers `0` for every URL, so nothing throttles. The interface and the deferral path exist, so a delaying policy drops in without touching the worker, but no such policy is written. See Opportunities. |
 | NFR3 | **Not overly saturate the crawled website.** | Partial. Retries back off exponentially with jitter, and a failed URL waits 5 minutes before it is due again, so a rate-limited host is not retried in a tight loop. There is no per-host concurrency cap and no `robots.txt` check. |
 | NFR4 | **Modular.** Each concern in its own module, not one service per module. | Met. Modules in separate folders, all on one event loop. |
-| NFR5 | **Scalable to higher traffic.** | Met by substitution, not by size. The store, queue, and fetcher sit behind interfaces, so the process scales by swapping them; the shipped crawler is single-process and single-worker. |
-| NFR6 | **Composition over inheritance.** | Met. Collaborators are constructor arguments. The one class that extends a port is `SQLiteURLStateRepository`, and nothing extends it. |
-| NFR7 | **Coding best practices.** SOLID, with each boundary behind an interface shipping one simple default. | Met. Ten interfaces in `ports/`, one shipped implementation each. |
+| NFR5 | **Scalable to higher traffic.** | Met by substitution, not by size. The store, queue, and fetcher sit behind interfaces, so the process scales by swapping them; the shipped crawler is single-process and runs one worker, whichever of the two is chosen. |
+| NFR6 | **Composition over inheritance.** | Met. Collaborators are constructor arguments. The classes that extend a port are the store and the two workers, and nothing extends them in turn. |
+| NFR7 | **Coding best practices.** SOLID, with each boundary behind an interface shipping one simple default. | Met. Eleven interfaces in `ports/`, each with one shipped implementation, except `CrawlWorker`, which ships two. |
 | NFR8 | **I/O best practices.** Every I/O call owned by the implementation that makes it. | Met. Retry and timeout live in the store and the fetcher, never in their callers, so nothing is retried twice. No I/O call blocks the event loop. |
 | NFR9 | **Fast.** | Met. The selection query is served by its indexes; the claim is a single `UPDATE ... RETURNING` per chunk rather than a select followed by an update. |
-| NFR10 | **Testable, with high code coverage.** | Partial. 77 unit tests, every collaborator mocked, so the suite is fast and needs no network. Coverage is **not** measured: no coverage tool is configured, so the number is unverified rather than high. |
+| NFR10 | **Testable, with high code coverage.** | Partial. 97 unit tests, every collaborator mocked, so the suite is fast and needs no network. Coverage is **not** measured: no coverage tool is configured, so the number is unverified rather than high. |
 | NFR11 | No crawling framework; the crawl loop, scheduler, and queue are our own. | Met. |
 | NFR12 | Async APIs wherever the operation is I/O. | Met. Everything under `ports/` is `async` except the three pure-CPU boundaries: link extraction, the clock, and request middleware. |
 | NFR13 | Complete signatures: arguments, return, and the exceptions a caller must handle, documented per function. | Met. |
@@ -66,7 +66,7 @@ worthless as a design document.
 
 ### Layout
 
-One process, one asyncio event loop, and six modules that matter. `main.py` is
+One process, one asyncio event loop, and seven modules that matter. `main.py` is
 the only place that knows which implementation is in use.
 
 | Module | One-line description |
@@ -74,23 +74,24 @@ the only place that knows which implementation is in use.
 | **db** (`infrastructure/db/`) | The crawl-state store. Holds one row per URL with its state and timestamps, and owns the SQL, the transactions, and its own retry. |
 | **db poller** (`application/url_poller.py`) | Asks the store which URLs are due, marks them `queued` in one bulk statement, and feeds them to the queue. |
 | **queue** (`infrastructure/queue/`) | Holds the pending work between the poller and the worker, as a bounded buffer with a separate parking area for messages that must not be retried. |
-| **crawl worker** (`application/worker.py`) | The consumer. Takes a batch off the queue, fetches every page in it concurrently, extracts the links, records the outcome, and commits. |
+| **crawl worker** (`application/worker.py`) | `CrawlerWorker`, the batch consumer. Takes a batch off the queue, fetches every page in it concurrently, extracts the links, records the outcome, and commits. |
+| **non-blocking crawl worker** (`application/worker_v1.py`) | `CrawlerWorkerV1`, the other `CrawlWorker`. Detaches a crawl per message and commits the batch at once, so a slow page never holds new work back, and writes the store in bulk on a 0.5s timer. |
 | **orchestrator** (`application/orchestrator.py`) | Seeds the crawl once, then runs the poller and the worker together and stops both when either fails. |
-| **main** (`main.py`) | The composition root. Reads the seed, constructs every object with its concrete class, runs the orchestrator, and releases everything on the way out. |
+| **main** (`main.py`) | The composition root. Reads the seed and the worker's choice, constructs every object with its concrete class, runs the orchestrator, and releases everything on the way out. |
 
 Three supporting packages sit underneath those six:
 
 | Package | One-line description |
 |---|---|
 | `domain/` | The value types every module agrees on: the canonical URL, the four crawl states, the queue message, and the error types that tell retry how to read a failure. |
-| `ports/` | The ten interfaces. What a module needs from another module, stated without saying how it is done. |
+| `ports/` | The eleven interfaces. What a module needs from another module, stated without saying how it is done. |
 | `utils/` | Two helpers with no project dependency: the `<a href>` collector and the logger setup. |
 
 ### Modularity and composition
 
 Two things make this replaceable rather than merely tidy.
 
-**Composition over inheritance.** Every collaborator is a constructor argument, passed in from `main.py`. A module reaches another only through the interface it was handed, never by importing a concrete class. The single exception is `SQLiteURLStateRepository`, the one class that extends a port, and nothing extends it in turn.
+**Composition over inheritance.** Every collaborator is a constructor argument, passed in from `main.py`. A module reaches another only through the interface it was handed, never by importing a concrete class. The only classes that extend a port are `SQLiteURLStateRepository` and the two `CrawlWorker`s, and nothing extends them in turn.
 
 **The implementation is the only thing that changes.** Because `application/` imports no implementation at all, swapping one is a constructor change in `main.py`:
 
@@ -100,6 +101,7 @@ Two things make this replaceable rather than merely tidy.
 | SQLite | a Postgres or MySQL store against `URLStateRepository` | None, though this one is real work: the claim is a single `UPDATE ... RETURNING`, which Postgres spells differently, and `sqlite3.Error` in the implementation's `Raises:` becomes a driver error. |
 | `aiohttp` | `httpx` against `WebPageFetcher` | None. Two methods, `fetch` and `close`. |
 | the no-op politeness policy | a rate-limiting one against `PolitenessPolicy` | None. The worker already asks before every fetch and never sleeps the answer. |
+| either worker | another one against `CrawlWorker` | None. The orchestrator only ever calls `run` and `close`, so a third worker is a new class and one line in `main.py`. |
 
 What does *not* survive a swap unchanged is scale. The shipped process is one
 worker reading one queue, so raising throughput means more workers, and the
@@ -109,7 +111,7 @@ crawlable set.
 
 ### Every file
 
-The six modules above are the ones that matter. This is the full tree, for
+The seven modules above are the ones that matter. This is the full tree, for
 anyone reading along:
 
 ```
@@ -118,7 +120,8 @@ src/webcrawler/
   application/
     orchestrator.py                        seeds once, then runs the poller and the worker in one TaskGroup
     url_poller.py                          CrawlQueuer: claims store rows on a timer and bulk-feeds the queue
-    worker.py                              the consumer: peek a batch, crawl it concurrently, record, commit
+    worker.py                              CrawlerWorker: peek a batch, crawl it concurrently, record, commit
+    worker_v1.py                           CrawlerWorkerV1: detach a crawl per message, bulk-write on a timer
   domain/
     custom_url.py                          immutable canonical URL; identity is scheme+host+port+path+query
     crawl_state.py                         the four row states: not_crawled, queued, started_crawl, finished_crawl
@@ -129,6 +132,7 @@ src/webcrawler/
   ports/
     url_state_repository.py                store interface: create, read, claim, mark started, complete, close
     crawl_queuer.py                        queueing interface: run the poll loop, enqueue URLs, queue candidates
+    crawl_worker.py                        worker interface: run the consume loop, close what it owns
     topic_producer.py                      queue write side: single, bulk, and dead-letter enqueue
     topic_reader.py                        queue read side: non-reserving peek, head-based commit
     web_page_fetcher.py                    fetch one page body and own the transport's lifetime
@@ -173,6 +177,7 @@ Every boundary is an `ABC`, so a replacement is a new class plus one line in
 |---|---|---|
 | `URLStateRepository` | `SQLiteURLStateRepository` | 7 async methods: `initialize`, `create_urls`, `close`, `get_crawlable_urls`, `claim_candidates`, `claim_urls`, `mark_started`, `complete_crawl` |
 | `CrawlQueuer` | `URLPoller` | 3 async methods: `run`, `enqueue_urls`, `queue_candidates` |
+| `CrawlWorker` | `CrawlerWorker`, `CrawlerWorkerV1` | 2 async methods: `run`, `close` |
 | `TopicProducer` | `InMemoryTopicProducer` | 3 async methods: `enqueue`, `enqueue_many`, `enqueue_to_deadletter` |
 | `TopicReader` | `InMemoryTopicReader` | 2 async methods: `peek`, `commit` |
 | `WebPageFetcher` | `AiohttpWebPageFetcher` | 2 async methods: `fetch`, `close` |
@@ -261,6 +266,8 @@ The choices that are not obvious from the code, each with what it cost.
 | A queue timeout stands in for a CDC pipeline | If a row reaches `queued` and the process dies before the message is sent, no change-data-capture stream exists to reconcile the two. A `queued` row older than `queue_timeout` is simply re-selected. | A lost message waits out the timeout. Set to 60 minutes, because at 30s a real backlog was being re-fetched while it still waited. |
 | Two retry settings, not one | A locked database frees in milliseconds; a 429 clears only on a seconds-scale window. One value fitted neither: it spent the whole fetch budget in 1.5s of backoff. | Two constants to keep coherent, and the fetch budget must stay under `JOB_TIMEOUT` or a still-retrying URL is claimed twice. |
 | A politeness wait defers, it never sleeps | One slow URL must not stall a batch, so the URL is rescheduled as `now + wait_ms` and the batch moves on. | A delaying policy is therefore not a throttle, it is a scheduler hint. Real pacing would need the cap in NFR2. |
+| Two workers behind one `CrawlWorker` port, picked at the prompt | They lose in opposite directions. The batch worker is ahead when every page answers in milliseconds; the non-blocking one is far ahead when one page stalls, since the batch worker leaves its whole batch waiting. Which case a run hits is not knowable before the run. | The operator chooses per run, and the two have to be kept at behavioural parity, since the port declares them the same worker. |
+| Bulk writes on a timer, not on a batch boundary | Waiting for a batch delays every write by its slowest fetch, and the non-blocking worker has no batch to wait for. | A write lands up to `flush_interval_seconds` late, and a crash inside that window leaves those rows for `job_timeout` to reclaim. |
 | Dedupe with sets and dicts, keyed by canonical URL | Two spellings of one page are the same string, so a duplicate is impossible by construction rather than something to check for. `times_crawled` can then be trusted as a re-crawl detector. | A URL that is both finished and discovered in one batch is written once, so the finish update has to win over the insert. |
 | One crawlable predicate shared by the read and the claim | Two copies of that SQL would eventually disagree, and the disagreement would be silent. | None, once it is one string. |
 | Bulk statements chunked under SQLite's parameter limit | A 1200-URL batch exceeds the 999 bound-parameter ceiling, so statements are chunked, each binding the remaining limit so chunking cannot overshoot `max_items`. | Bound to SQLite. Postgres has no such ceiling, so the chunking becomes unnecessary rather than wrong. |
@@ -268,7 +275,7 @@ The choices that are not obvious from the code, each with what it cost.
 | Retry owned by the I/O implementation | The store and the fetcher each hold a policy; the poller and the worker hold none, so nothing is retried twice. A `commit` is never retried either, being head-based, so a second attempt would remove more than the batch owns. | A caller cannot add its own retry without risking a double. |
 | The in-memory queue has no lock | CPU-bound on a single event loop, and the shipped path has exactly one reader. | A second reader would need one. The `peek`/`commit` contract is already count-based, so it would not change the callers. |
 | Tests mock every collaborator | A unit test that builds a real store and a real queue tests the implementation twice and breaks whenever it is refactored. | The store's own SQL is asserted through a mocked `aiosqlite` connection rather than a real database, so it is checked as calls and parameters, not as stored state. |
-| 77 tests, happy path and the failure that matters | A test earns its place by naming a decision. The failing paths kept are the ones that change what happens next: a fetch that fails without stopping its batch, a `complete_crawl` that fails without enqueueing, a claim that exhausts its budget. | No coverage measurement is configured, so the number is unverified. NFR10. |
+| 97 tests, happy path and the failure that matters | A test earns its place by naming a decision. The failing paths kept are the ones that change what happens next: a fetch that fails without stopping its batch, a `complete_crawl` that fails without enqueueing, a claim that exhausts its budget. Both workers are covered, so the port that stands between them has both sides of the contract tested. | No coverage measurement is configured, so the number is unverified. NFR10. |
 
 ## How To Run It
 
@@ -318,7 +325,26 @@ seed url>
 Type any URL and press Enter, for example `https://crawlme.monzo.com/index.html`.
 Press Enter on an empty line to use the built-in default,
 `https://crawlme.monzo.com`. There is no way to change the seed once the crawl
-starts. Add `--debug` for `DEBUG` logging instead of `INFO`:
+starts.
+
+Next it asks which worker to use, the same prompt every run:
+
+```
+worker> Pick the worker: 1 = CrawlerWorker, which waits for each batch to finish. 2 = CrawlerWorkerV1, which keeps fetching while earlier pages are still in flight, up to 500 at a time. Press Enter for 1.
+```
+
+Press Enter for `CrawlerWorker`, or type `2` for `CrawlerWorkerV1`. They also
+differ in when they write: `CrawlerWorker` writes once per finished batch,
+while `CrawlerWorkerV1` writes every 0.5s whatever is buffered. Neither is
+faster on every site: on a local site with 150ms responses and a 6-second stall
+every twentieth page, `CrawlerWorkerV1` crawled all 4000 pages in 40s while
+`CrawlerWorker` managed 317, because it left 3066 claimed rows waiting behind
+the slow pages. On a site where every page answers in milliseconds,
+`CrawlerWorker` was about twice as fast, since `CrawlerWorkerV1`'s 0.5s write
+window sits between "links found" and "links crawlable" and nothing is slow
+enough to overlap it.
+
+Add `--debug` for `DEBUG` logging instead of `INFO`:
 
 ```bash
 python -m webcrawler.main --debug
@@ -329,6 +355,8 @@ Watch it work, every visited page and its links are logged:
 ```
 2026-09-29 21:14:34 INFO webcrawler.application.worker: visited https://crawlme.monzo.com/index.html, found 10 link(s): [...]
 ```
+
+With worker `2` the same line comes from `webcrawler.application.worker_v1`.
 
 Press `Ctrl+C` to stop. It exits cleanly and closes the database and session.
 
@@ -417,6 +445,10 @@ deactivate                            # leave the virtual environment
 - **Politeness defers, it never sleeps.** A non-zero wait reschedules that one
   URL as `now + wait_ms` and moves on, so one slow URL cannot stall a batch, and
   a real rate-limiting policy drops in without touching the worker.
+- **Two workers, one port.** `CrawlerWorker` waits for a whole batch and writes
+  once at the end of it; `CrawlerWorkerV1` detaches a crawl per message, holds up
+  to 500 fetches in flight and writes the store every 0.5s. `main.py` asks which
+  one to build, and the orchestrator only ever calls `run` and `close`.
 - **Retry belongs to the I/O modules.** The store and the fetcher each hold a
   policy; the poller and the worker hold none, so nothing is retried twice. The
   two settings differ, because a locked database frees in milliseconds while a

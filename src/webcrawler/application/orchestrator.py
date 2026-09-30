@@ -9,8 +9,8 @@ import asyncio
 import logging
 
 from webcrawler.application.url_poller import URLPoller
-from webcrawler.application.worker import CrawlerWorker
 from webcrawler.domain.custom_url import CustomURL, InvalidURLError
+from webcrawler.ports.crawl_worker import CrawlWorker
 from webcrawler.ports.url_state_repository import URLStateRepository
 
 
@@ -21,7 +21,7 @@ class Orchestrator:
         self,
         repository: URLStateRepository,
         poller: URLPoller,
-        worker: CrawlerWorker,
+        worker: CrawlWorker,
         seed_line: str,
     ) -> None:
         """Hold the collaborators; nothing is started here.
@@ -29,7 +29,7 @@ class Orchestrator:
         Args:
         repository: The crawl state store.
         poller: The queuer and the one poll loop this class runs.
-        worker: The crawl consumer.
+        worker: The crawl consumer, any `CrawlWorker` over the same ports.
         seed_line: The operator's single seed URL.
 
         Returns:

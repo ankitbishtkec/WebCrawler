@@ -1,4 +1,4 @@
-"""The crawl worker: the consumer half of the crawl loop.
+"""The crawl worker: the consumer half of the crawl loop, behind `CrawlWorker`.
 
 It reads a batch, crawls each URL concurrently, then records the outcome, queues
 the discovered URLs, deadletters the failures, and commits the batch. Every
@@ -13,6 +13,7 @@ from webcrawler.domain.base_result import BaseResult
 from webcrawler.domain.custom_url import CustomURL
 from webcrawler.domain.messages import BaseMessage
 from webcrawler.ports.crawl_queuer import CrawlQueuer
+from webcrawler.ports.crawl_worker import CrawlWorker
 from webcrawler.ports.link_extractor import LinkExtractor
 from webcrawler.ports.politeness_policy import PolitenessPolicy
 from webcrawler.ports.time_provider import TimeProviderFactory
@@ -26,8 +27,11 @@ from webcrawler.ports.web_page_fetcher import WebPageFetcher
 _CrawlResult = tuple[tuple[CustomURL, datetime | None], set[CustomURL], bool]
 
 
-class CrawlerWorker:
+class CrawlerWorker(CrawlWorker):
     """Consumes the crawl queue one batch at a time, forever.
+
+    The `CrawlWorker` that waits for its batch: `CrawlerWorkerV1` in
+    `application/worker_v1.py` is the other one, and `main.py` picks either.
 
     `run` returns only on cancellation, since a crawl ends when the operator
     interrupts it.

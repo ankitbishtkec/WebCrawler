@@ -2,7 +2,8 @@
 
 Every other module sees a port, so this is where the concrete classes are
 chosen and connected: one queue behind both queue views, one retry policy
-for the store and the fetches, one politeness policy that never waits.
+for the store and the fetches, one politeness policy that never waits, and the
+operator's choice between the two `CrawlWorker` implementations.
 """
 
 
@@ -14,6 +15,7 @@ from datetime import timedelta
 from webcrawler.application.orchestrator import Orchestrator
 from webcrawler.application.url_poller import URLPoller
 from webcrawler.application.worker import CrawlerWorker
+from webcrawler.application.worker_v1 import CrawlerWorkerV1
 from webcrawler.domain.retry_settings import RetrySettings
 from webcrawler.infrastructure.db.sqlite_url_state_repository import (
     SQLiteURLStateRepository)
@@ -35,6 +37,7 @@ from webcrawler.infrastructure.queue.in_memory_single_topic_single_partition_que
 from webcrawler.infrastructure.retry.exponential_backoff_retry_policy import (
     ExponentialBackoffRetryPolicy)
 from webcrawler.infrastructure.time.system_time_provider import SystemTimeProvider
+from webcrawler.ports.crawl_worker import CrawlWorker
 from webcrawler.ports.request_middleware import RequestMiddleware
 from webcrawler.utils.logger import configure_logging
 
@@ -73,12 +76,21 @@ FETCH_RETRY_SETTINGS: RetrySettings = RetrySettings(
 HTTP_CALL_TIMEOUT_SECONDS: int = FETCH_RETRY_SETTINGS.timeout_seconds - 2.0
 # The seed used when the operator just presses Enter at the prompt.
 DEFAULT_SEED_URL: str = "https://crawlme.monzo.com"
+# The workers the operator picks at the prompt, keyed by what they type, and
+# the one an empty or unrecognised answer falls back to: it crawls a batch of
+# URLs and waits for all of them before taking more, so a slow site idles it.
+WORKER_CHOICES: dict[str, type[CrawlWorker]] = {
+    "1": CrawlerWorker,
+    "2": CrawlerWorkerV1,
+}
+DEFAULT_WORKER_CHOICE: str = "1"
 # Several sites answer 503 to a non-browser agent, so the crawler presents as
 # a normal browser.
 async def main() -> None:
     """Wire every concrete class to its port and run one seed-once crawl.
 
-    The seed is read before any task exists, so the loop is never blocked.
+    The seed and the worker choice are read before any task exists, so the
+    loop is never blocked.
 
     Raises:
     asyncio.CancelledError: When the run is interrupted; the
@@ -98,6 +110,24 @@ async def main() -> None:
         f"stop. Press Enter to crawl default seed url {DEFAULT_SEED_URL}."
         )
     seed_line = input("seed url> ").strip() or DEFAULT_SEED_URL
+    # The worker's behaviour is the operator's choice. Only the difference the
+    # operator has to act on goes in the prompt; the rest is in the README.
+    print(
+        f"Pick the worker: 1 = {WORKER_CHOICES['1'].__name__}, which waits for "
+        f"each batch to finish. 2 = {WORKER_CHOICES['2'].__name__}, which keeps "
+        f"fetching while earlier pages are still in flight, up to 500 at a "
+        f"time. Press Enter for default worker that is 1."
+    )
+    worker_choice = input("worker> ").strip() or DEFAULT_WORKER_CHOICE
+    if worker_choice not in WORKER_CHOICES:
+        logger.warning(
+            "%r is not a worker choice, so %s is used",
+            worker_choice,
+            WORKER_CHOICES[DEFAULT_WORKER_CHOICE].__name__,
+        )
+        worker_choice = DEFAULT_WORKER_CHOICE
+    worker_class = WORKER_CHOICES[worker_choice]
+    logger.info("crawling with %s", worker_class.__name__)
     time_provider = SystemTimeProvider()
     # One queue behind both views: the poller must fill the queue the worker
     # reads, or the crawl stops after the seed.
@@ -108,7 +138,7 @@ async def main() -> None:
     store_retry_policy = ExponentialBackoffRetryPolicy(STORE_RETRY_SETTINGS)
     repository = SQLiteURLStateRepository(
         DB_FILE, store_retry_policy, time_provider)
-    worker: CrawlerWorker | None = None
+    worker: CrawlWorker | None = None
     # This file builds what the run needs, so this is where they are released.
     try:
         await repository.initialize()
@@ -131,7 +161,9 @@ async def main() -> None:
             job_timeout=JOB_TIMEOUT,
             queue_timeout=QUEUE_TIMEOUT,
             time_provider=time_provider)
-        worker = CrawlerWorker(
+        # Both workers take the same ports in the same order, so the choice
+        # made above is the only thing that differs between the two.
+        worker = worker_class(
             repository,
             reader,
             fetcher,
