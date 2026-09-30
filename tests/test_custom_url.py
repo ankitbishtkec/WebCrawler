@@ -1,13 +1,15 @@
-"""Happy-path tests for `CustomURL`, the canonical URL value type.
+"""Tests for `CustomURL`, the canonical URL value type.
 
 Canonical form is what collapses two spellings of one page into a single crawl
 row, so the rebuilt text and the equality it produces are the whole contract
-here. Nothing is mocked: the type is pure and takes a string.
+here. The one rejection is the same idea read the other way: a string that is
+not crawlable never becomes a value. Nothing is mocked: the type is pure and
+takes a string.
 """
 
 import pytest
 
-from webcrawler.domain.custom_url import CustomURL
+from webcrawler.domain.custom_url import CustomURL, InvalidURLError
 
 
 @pytest.mark.parametrize(
@@ -58,3 +60,24 @@ def test_two_spellings_of_one_url_are_equal_and_hash_equal(
 
     assert first == second
     assert hash(first) == hash(second)
+
+
+@pytest.mark.parametrize(
+    ("raw"),
+    [
+        ("/a/relative/page.html"),
+        ("mailto:someone@example.com"),
+        ("example.com/a"),
+    ],
+)
+def test_a_string_that_is_not_an_absolute_http_url_is_rejected(raw: str) -> None:
+    """A relative path, a non-http scheme, and a bare host are all uncrawlable.
+
+    Args:
+    raw: The URL text handed to the constructor, which must be refused.
+
+    Returns:
+    None
+    """
+    with pytest.raises(InvalidURLError):
+        CustomURL(raw)

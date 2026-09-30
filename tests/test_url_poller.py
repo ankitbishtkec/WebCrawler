@@ -139,3 +139,64 @@ async def test_the_claim_is_asked_for_with_the_configured_timeouts_and_limit() -
     built.repository.claim_candidates.assert_awaited_once_with(
         NOW, MAX_ITEMS, job_timeout=JOB_TIMEOUT, queue_timeout=QUEUE_TIMEOUT
     )
+
+
+async def test_a_failed_claim_feeds_the_queue_nothing() -> None:
+    """A claim that raises ends the poll, so the feed is never reached.
+
+    Returns:
+    None
+    """
+    built = _build_poller(_claimed(2))
+    built.repository.claim_candidates.side_effect = RuntimeError("the claim failed")
+
+    await built.poller.queue_candidates(NOW, REQUEST_ID)
+
+    built.producer.enqueue_many.assert_not_awaited()
+
+
+async def test_a_failed_caller_url_claim_feeds_the_queue_nothing() -> None:
+    """The one guard covers the other claim too, so the caller's URLs are not fed.
+
+    Returns:
+    None
+    """
+    built = _build_poller(set())
+    built.repository.claim_urls.side_effect = RuntimeError("the claim failed")
+
+    await built.poller.enqueue_urls([CustomURL(f"{HOST}/page-1.html")], REQUEST_ID)
+
+    built.producer.enqueue_many.assert_not_awaited()
+
+
+async def test_a_failed_feed_is_raised_to_the_caller() -> None:
+    """The feed is unguarded, so a networked producer's failure ends the poll.
+
+    Returns:
+    None
+    """
+    built = _build_poller(_claimed(1))
+    built.producer.enqueue_many.side_effect = RuntimeError("the send failed")
+
+    with pytest.raises(RuntimeError, match="the send failed"):
+        await built.poller.queue_candidates(NOW, REQUEST_ID)
+
+    built.repository.claim_candidates.assert_awaited_once()
+
+
+async def test_a_rejected_message_does_not_stop_the_claim_being_fed() -> None:
+    """One overflowed message is only reported, so the whole claim is still sent.
+
+    Returns:
+    None
+    """
+    built = _build_poller(_claimed(2))
+    built.producer.enqueue_many.return_value = [False, True]
+
+    await built.poller.queue_candidates(NOW, REQUEST_ID)
+
+    built.producer.enqueue_many.assert_awaited_once_with(
+        [BaseMessage(url, partition_key=hash(url)) for url in built.claimed],
+        REQUEST_ID,
+    )
+

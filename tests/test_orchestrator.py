@@ -129,3 +129,66 @@ async def test_a_seed_that_is_not_a_url_creates_and_queues_nothing() -> None:
 
     built.repository.create_urls.assert_not_awaited()
     built.poller.enqueue_urls.assert_not_awaited()
+
+
+async def test_an_empty_seed_creates_and_queues_nothing() -> None:
+    """An empty seed ends the session before the seed is even parsed as a URL.
+
+    Returns:
+    None
+    """
+    built = _build_orchestrator("")
+
+    await built.orchestrator.run()
+
+    built.repository.create_urls.assert_not_awaited()
+    built.poller.run.assert_not_awaited()
+    built.worker.run.assert_not_awaited()
+
+
+async def test_a_seed_the_store_cannot_create_queues_and_crawls_nothing() -> None:
+    """A failed insert ends the session, so the queue and both loops are untouched.
+
+    Returns:
+    None
+    """
+    built = _build_orchestrator(SEED)
+    built.repository.create_urls.side_effect = RuntimeError("the insert failed")
+
+    await built.orchestrator.run()
+
+    built.poller.enqueue_urls.assert_not_awaited()
+    built.poller.run.assert_not_awaited()
+    built.worker.run.assert_not_awaited()
+
+
+async def test_a_seed_the_poller_cannot_queue_is_still_a_durable_row() -> None:
+    """The row outlives the failure, so only the two loops are never started.
+
+    Returns:
+    None
+    """
+    built = _build_orchestrator(SEED)
+    built.poller.enqueue_urls.side_effect = RuntimeError("the claim failed")
+
+    await built.orchestrator.run()
+
+    built.repository.create_urls.assert_awaited_once_with({CustomURL(SEED)})
+    built.poller.run.assert_not_awaited()
+    built.worker.run.assert_not_awaited()
+
+
+async def test_a_crawl_task_that_fails_returns_instead_of_raising() -> None:
+    """One failed task is logged, so `run` returns after both loops were started.
+
+    Returns:
+    None
+    """
+    built = _build_orchestrator(SEED)
+    built.worker.run.side_effect = RuntimeError("the worker died")
+
+    assert await built.orchestrator.run() is None
+
+    built.poller.run.assert_awaited_once_with()
+    built.worker.run.assert_awaited_once_with()
+
