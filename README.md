@@ -32,21 +32,31 @@ The brief, taken from its opening paragraph, asks for exactly three things.
 
 ## Non-Functional Requirements
 
-| # | Requirement |
-|---|---|
-| NFR1 | No crawling framework; the crawl loop, scheduler, and queue are our own. |
-| NFR2 | Modules in separate folders rather than one service per module, all on a single asyncio event loop. |
-| NFR3 | Composition over inheritance. |
-| NFR4 | SOLID, with the database, queue, fetcher, clock, retry, politeness, and middleware behind interfaces that each ship one simple default. |
-| NFR5 | Async APIs wherever the operation is I/O. |
-| NFR6 | Complete signatures: arguments, return, and the exceptions a caller must handle, documented per function. |
-| NFR7 | Comments only for non-obvious design decisions, concurrency invariants, race avoidance, and trade-offs, never for obvious code. |
-| NFR8 | Parameterised unit tests. |
-| NFR9 | Retry is owned by the I/O implementation, never by its caller, so nothing is retried twice. |
-| NFR10 | All timestamps stored are UTC; a new row gets `next_crawl_time = created_time`. |
-| NFR11 | Index the primary key, and `(state, next_crawl_time, last_status_update_time)` for the selection predicate. |
-| NFR12 | SQLite >= 3.35, because the claim query is `UPDATE ... RETURNING`. |
-| NFR13 | No re-crawl of a finished URL unless a re-crawl interval is configured. |
+The qualities the crawler is judged on, with where each one actually stands. The
+status column is deliberate: a requirement list that claims everything is met is
+worthless as a design document.
+
+| # | Requirement | Status |
+|---|---|---|
+| NFR1 | **Concurrent.** Many pages are fetched at once, not one after another. | Met. One `asyncio.TaskGroup` per batch fetches all 50 messages of a batch together on a single event loop. |
+| NFR2 | **Fetch fairly, without saturating the host.** Do not hammer a site. | **Not met.** The shipped `NoOpPolitenessPolicy` answers `0` for every URL, so nothing throttles. The interface and the deferral path exist, so a delaying policy drops in without touching the worker, but no such policy is written. See Opportunities. |
+| NFR3 | **Not overly saturate the crawled website.** | Partial. Retries back off exponentially with jitter, and a failed URL waits 5 minutes before it is due again, so a rate-limited host is not retried in a tight loop. There is no per-host concurrency cap and no `robots.txt` check. |
+| NFR4 | **Modular.** Each concern in its own module, not one service per module. | Met. Modules in separate folders, all on one event loop. |
+| NFR5 | **Scalable to higher traffic.** | Met by substitution, not by size. The store, queue, and fetcher sit behind interfaces, so the process scales by swapping them; the shipped crawler is single-process and single-worker. |
+| NFR6 | **Composition over inheritance.** | Met. Collaborators are constructor arguments. The one class that extends a port is `SQLiteURLStateRepository`, and nothing extends it. |
+| NFR7 | **Coding best practices.** SOLID, with each boundary behind an interface shipping one simple default. | Met. Ten interfaces in `ports/`, one shipped implementation each. |
+| NFR8 | **I/O best practices.** Every I/O call owned by the implementation that makes it. | Met. Retry and timeout live in the store and the fetcher, never in their callers, so nothing is retried twice. No I/O call blocks the event loop. |
+| NFR9 | **Fast.** | Met. The selection query is served by its indexes; the claim is a single `UPDATE ... RETURNING` per chunk rather than a select followed by an update. |
+| NFR10 | **Testable, with high code coverage.** | Partial. 77 unit tests, every collaborator mocked, so the suite is fast and needs no network. Coverage is **not** measured: no coverage tool is configured, so the number is unverified rather than high. |
+| NFR11 | No crawling framework; the crawl loop, scheduler, and queue are our own. | Met. |
+| NFR12 | Async APIs wherever the operation is I/O. | Met. Everything under `ports/` is `async` except the three pure-CPU boundaries: link extraction, the clock, and request middleware. |
+| NFR13 | Complete signatures: arguments, return, and the exceptions a caller must handle, documented per function. | Met. |
+| NFR14 | Comments only for non-obvious design decisions, concurrency invariants, race avoidance, and trade-offs. | Met. |
+| NFR15 | Parameterised unit tests. | Met. |
+| NFR16 | All timestamps stored are UTC; a new row gets `next_crawl_time = created_time`. | Met. |
+| NFR17 | Index the primary key, and the state plus both time columns for the selection predicate. | Met. |
+| NFR18 | SQLite >= 3.35, because the claim query is `UPDATE ... RETURNING`. | Met, asserted at startup. |
+| NFR19 | No re-crawl of a finished URL unless a re-crawl interval is configured. | Met. |
 
 ## High Level Design
 
@@ -56,8 +66,51 @@ The brief, taken from its opening paragraph, asks for exactly three things.
 
 ### Layout
 
-One process, one event loop, 33 modules. `main.py` is the composition root and
-holds no logic.
+One process, one asyncio event loop, and six modules that matter. `main.py` is
+the only place that knows which implementation is in use.
+
+| Module | One-line description |
+|---|---|
+| **db** (`infrastructure/db/`) | The crawl-state store. Holds one row per URL with its state and timestamps, and owns the SQL, the transactions, and its own retry. |
+| **db poller** (`application/url_poller.py`) | Asks the store which URLs are due, marks them `queued` in one bulk statement, and feeds them to the queue. |
+| **queue** (`infrastructure/queue/`) | Holds the pending work between the poller and the worker, as a bounded buffer with a separate parking area for messages that must not be retried. |
+| **crawl worker** (`application/worker.py`) | The consumer. Takes a batch off the queue, fetches every page in it concurrently, extracts the links, records the outcome, and commits. |
+| **orchestrator** (`application/orchestrator.py`) | Seeds the crawl once, then runs the poller and the worker together and stops both when either fails. |
+| **main** (`main.py`) | The composition root. Reads the seed, constructs every object with its concrete class, runs the orchestrator, and releases everything on the way out. |
+
+Three supporting packages sit underneath those six:
+
+| Package | One-line description |
+|---|---|
+| `domain/` | The value types every module agrees on: the canonical URL, the four crawl states, the queue message, and the error types that tell retry how to read a failure. |
+| `ports/` | The ten interfaces. What a module needs from another module, stated without saying how it is done. |
+| `utils/` | Two helpers with no project dependency: the `<a href>` collector and the logger setup. |
+
+### Modularity and composition
+
+Two things make this replaceable rather than merely tidy.
+
+**Composition over inheritance.** Every collaborator is a constructor argument, passed in from `main.py`. A module reaches another only through the interface it was handed, never by importing a concrete class. The single exception is `SQLiteURLStateRepository`, the one class that extends a port, and nothing extends it in turn.
+
+**The implementation is the only thing that changes.** Because `application/` imports no implementation at all, swapping one is a constructor change in `main.py`:
+
+| Instead of | Write | Application changes |
+|---|---|---|
+| the in-memory queue | a Kafka producer and reader against `TopicProducer` / `TopicReader` | None. The reader already takes `topic` and `consumer_group_id`, the producer takes `topic`, and every `BaseMessage` already carries a `partition_key`. The in-memory pair accepts all three and ignores them, so the shape is already a broker's. |
+| SQLite | a Postgres or MySQL store against `URLStateRepository` | None, though this one is real work: the claim is a single `UPDATE ... RETURNING`, which Postgres spells differently, and `sqlite3.Error` in the implementation's `Raises:` becomes a driver error. |
+| `aiohttp` | `httpx` against `WebPageFetcher` | None. Two methods, `fetch` and `close`. |
+| the no-op politeness policy | a rate-limiting one against `PolitenessPolicy` | None. The worker already asks before every fetch and never sleeps the answer. |
+
+What does *not* survive a swap unchanged is scale. The shipped process is one
+worker reading one queue, so raising throughput means more workers, and the
+queue has to honour the partition key before two workers can share it safely.
+The store's claim is already safe for that, since a claimed row leaves the
+crawlable set.
+
+### Every file
+
+The six modules above are the ones that matter. This is the full tree, for
+anyone reading along:
 
 ```
 src/webcrawler/
@@ -104,21 +157,17 @@ src/webcrawler/
 Dependency direction, one way only:
 
 ```
-domain  <-  ports  <-  application  <-  main.py
-   ^          ^            ^
-   +----------+------------+-------------->  infrastructure
-                                                       ^
-                                                       +-->  utils
+domain(aka models)  <-  ports(aka interfaces)
+   ^                       ^            
+   +-----------------------+-------------------------->  infrastructure(aka implementations)  <-  application  <-  main.py
+                                                               ^
+                                                               +-->  utils
 ```
-
-`domain/` imports only the standard library. Nothing under `ports/` imports an
-implementation. `application/` imports no infrastructure. `utils/` imports
-nothing from the project; `infrastructure/html` is what depends on it.
 
 ### Extending it
 
 Every boundary is an `ABC`, so a replacement is a new class plus one line in
-`main.py`. Nothing in `ports/` changes.
+`main.py`. Nothing under `ports/` changes.
 
 | Port | Shipped default | A new implementation must provide |
 |---|---|---|
@@ -133,15 +182,12 @@ Every boundary is an `ABC`, so a replacement is a new class plus one line in
 | `TimeProviderFactory` | `SystemTimeProvider` | 1 sync method: `now()` |
 | `RequestMiddleware` | `HeadersMiddleware` | 1 sync method: `apply(url, headers)` |
 
-Two seams are not ports. The in-memory queue is a plain class with no
-interface, so a real broker replaces it by replacing **both** queue adapters
-together. And `AiohttpWebPageFetcher` takes a `session_factory`, which is how
-the tests substitute a session.
+`AiohttpWebPageFetcher` also takes a `session_factory`, which is how the tests
+substitute a session.
 
-The queue deliberately keeps the parameters a real broker needs, `topic`,
-`consumer_group_id`, and a `partition_key` on each message, and accepts them
-while ignoring them, so the in-memory default can be swapped without a caller
-noticing.
+Two of these are not ports. The in-memory queue is a plain class with no
+interface, so a real broker replaces it by replacing **both** queue adapters
+together, which is why the swap table above lists the pair.
 
 ### Database schema
 
@@ -159,9 +205,9 @@ SQLite's `YYYY-MM-DD HH:MM:SS` form, which sorts correctly as a string and lets
 | `last_status_update_time` | `TEXT` | no | `CURRENT_TIMESTAMP` | When the row last changed state. The two staleness timeouts compare against this. |
 | `times_crawled` | `INTEGER` | no | `0` | Incremented once per completed crawl. Makes a re-crawl loop visible in the data alone. |
 
-Using the canonical text as the key is what makes the primary key do the dedupe:
-two spellings of one URL are the same string, so a collision is impossible rather
-than something the code has to check for.
+The primary key is the URL itself, the canonical text rather than a surrogate id,
+so two spellings of one page are the same string and a duplicate is impossible by
+construction.
 
 **Indexes.** Three exist, one of them SQLite's own for the primary key:
 
@@ -171,22 +217,20 @@ than something the code has to check for.
 | `idx_urls_state_next` | `(state, next_crawl_time)` | claiming due URLs, which orders by `next_crawl_time` |
 | `idx_urls_state_status` | `(state, last_status_update_time)` | the two staleness branches, which range over `last_status_update_time` within one state |
 
-The second index is why the staleness comparison is written against the bare
-column rather than wrapped in `strftime(...)`. A function on the column would stop
-the index matching. The query plan confirms both are used, and that a combined
-crawlable selection is served as a `MULTI-INDEX OR` across the two:
+The second index is why staleness is compared against the bare column rather than
+wrapped in `strftime(...)`, which would stop the index matching. `EXPLAIN QUERY
+PLAN` confirms both are used, combined as a `MULTI-INDEX OR`.
 
-```
-SEARCH urls USING INDEX idx_urls_state_status (state=?)
-SEARCH urls USING INDEX idx_urls_state_next  (state=? AND next_crawl_time<?)
-```
+Two guards are deliberately absent, because each looks like hygiene and quietly
+breaks recovery. There is no `NOT NULL` on `next_crawl_time`, since a `NULL`
+there is how a finished URL records "never again" and `NULL <= :now` is never
+true. And the claim has no `state NOT IN (...)` filter, nor a top-level
+`next_crawl_time IS NOT NULL` guard, because either would permanently exclude the
+two staleness branches that reclaim abandoned work.
 
-**What is deliberately absent.** There is no `NOT NULL` on `next_crawl_time`,
-because a finished URL is stored as `NULL` to mean "never again" and the
-predicate's `next_crawl_time <= :now` is never true for `NULL`. There is also no
-`state NOT IN (...)` guard on the claim, because it would permanently exclude the
-two staleness branches that recover abandoned work. A top-level
-`next_crawl_time IS NOT NULL` guard would do the same damage.
+The SQL itself lives in `src/webcrawler/infrastructure/db/models.py`, with the
+crawlable predicate written once and shared by the read and the claim so the two
+cannot disagree.
 
 ### `pyproject.toml`
 
@@ -204,6 +248,27 @@ lockfile.
 
 `sqlite-utils` is **not** a dependency. It is only a convenience for the
 inspection queries below, so it is installed separately.
+
+## Design Decisions
+
+The choices that are not obvious from the code, each with what it cost.
+
+| Decision | Why | What it cost |
+|---|---|---|
+| Modules in folders on one event loop, not a service per module | The brief asked for a production shape without a deployment's worth of moving parts. One process means one queue, one store, and no network hop between the poller and the worker. | No horizontal scale for free. Raising throughput means more workers, which needs a broker that honours the partition key. |
+| One batch, one transaction, one commit | `complete_crawl` writes every outcome and every discovered URL atomically, so a crash cannot leave a page recorded without its links. | A failed write loses the whole batch's outcomes, so the batch is deadlettered and its rows are left `started_crawl` for `job_timeout` to reclaim. |
+| `complete_crawl` before `enqueue_urls` before `commit` | Each step only after the one before it is durable. `enqueue_urls` claims the rows the insert created, and `commit` acknowledges work that is only finished once recorded. | None. The other orderings all double-fetch or lose work. |
+| A queue timeout stands in for a CDC pipeline | If a row reaches `queued` and the process dies before the message is sent, no change-data-capture stream exists to reconcile the two. A `queued` row older than `queue_timeout` is simply re-selected. | A lost message waits out the timeout. Set to 60 minutes, because at 30s a real backlog was being re-fetched while it still waited. |
+| Two retry settings, not one | A locked database frees in milliseconds; a 429 clears only on a seconds-scale window. One value fitted neither: it spent the whole fetch budget in 1.5s of backoff. | Two constants to keep coherent, and the fetch budget must stay under `JOB_TIMEOUT` or a still-retrying URL is claimed twice. |
+| A politeness wait defers, it never sleeps | One slow URL must not stall a batch, so the URL is rescheduled as `now + wait_ms` and the batch moves on. | A delaying policy is therefore not a throttle, it is a scheduler hint. Real pacing would need the cap in NFR2. |
+| Dedupe with sets and dicts, keyed by canonical URL | Two spellings of one page are the same string, so a duplicate is impossible by construction rather than something to check for. `times_crawled` can then be trusted as a re-crawl detector. | A URL that is both finished and discovered in one batch is written once, so the finish update has to win over the insert. |
+| One crawlable predicate shared by the read and the claim | Two copies of that SQL would eventually disagree, and the disagreement would be silent. | None, once it is one string. |
+| Bulk statements chunked under SQLite's parameter limit | A 1200-URL batch exceeds the 999 bound-parameter ceiling, so statements are chunked, each binding the remaining limit so chunking cannot overshoot `max_items`. | Bound to SQLite. Postgres has no such ceiling, so the chunking becomes unnecessary rather than wrong. |
+| Empty input issues no statement | `IN ()` is rejected outright by some engines, so an empty set short-circuits. | None, and it makes the empty case cheap. |
+| Retry owned by the I/O implementation | The store and the fetcher each hold a policy; the poller and the worker hold none, so nothing is retried twice. A `commit` is never retried either, being head-based, so a second attempt would remove more than the batch owns. | A caller cannot add its own retry without risking a double. |
+| The in-memory queue has no lock | CPU-bound on a single event loop, and the shipped path has exactly one reader. | A second reader would need one. The `peek`/`commit` contract is already count-based, so it would not change the callers. |
+| Tests mock every collaborator | A unit test that builds a real store and a real queue tests the implementation twice and breaks whenever it is refactored. | The store's own SQL is asserted through a mocked `aiosqlite` connection rather than a real database, so it is checked as calls and parameters, not as stored state. |
+| 77 tests, happy path and the failure that matters | A test earns its place by naming a decision. The failing paths kept are the ones that change what happens next: a fetch that fails without stopping its batch, a `complete_crawl` that fails without enqueueing, a claim that exhausts its budget. | No coverage measurement is configured, so the number is unverified. NFR10. |
 
 ## How To Run It
 
