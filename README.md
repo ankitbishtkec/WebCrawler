@@ -307,10 +307,12 @@ deactivate                            # leave the virtual environment
 - **Politeness defers, it never sleeps.** A non-zero wait reschedules that one
   URL as `now + wait_ms` and moves on, so one slow URL cannot stall a batch, and
   a real rate-limiting policy drops in without touching the worker.
-- **Retry belongs to the I/O modules.** The store and the fetcher each hold the
-  one shared policy; the poller and the worker hold none, so nothing is
-  retried twice. A non-retryable status fails on the first attempt, and a
-  transport error or timeout backs off exponentially with jitter.
+- **Retry belongs to the I/O modules.** The store and the fetcher each hold a
+  policy; the poller and the worker hold none, so nothing is retried twice. The
+  two settings differ, because a locked database frees in milliseconds while a
+  429 clears only on a seconds-scale window, and one shared value spent the
+  whole fetch budget in two seconds. A non-retryable status fails on the first
+  attempt, and a transport error or timeout backs off exponentially with jitter.
 - **A spent URL is terminal, not retried forever.** A fetch that exhausts its
   attempts records a `NULL` `next_crawl_time`, which the predicate never
   selects, and the message is dead-lettered.
