@@ -22,22 +22,13 @@ tests, rather than in presentation.
 
 ## Functional Requirements
 
-| # | Requirement |
-|---|---|
-| FR1 | Accept one seed URL at startup and crawl that exact host until interrupted. |
-| FR2 | Resolve both absolute and relative `href` values to full URLs, against the page they were found on. |
-| FR3 | Keep only links whose hostname **equals** the page's hostname; drop every other host. |
-| FR4 | Log each visited URL and the links extracted from it. |
-| FR5 | Persist URL state in SQLite across four states: `not_crawled`, `queued`, `started_crawl`, `finished_crawl`. |
-| FR6 | Select crawlable rows in bulk using one shared predicate, ordered by `next_crawl_time` and limited by `max_items`. |
-| FR7 | Transition rows to `queued` atomically (`BEGIN IMMEDIATE` + `UPDATE ... RETURNING`) and enqueue only the rows actually claimed. |
-| FR8 | Offer on-demand queue APIs: enqueue specific URLs, and queue up to `max_items` candidates. |
-| FR9 | On each batch: mark the URLs started, fetch and extract concurrently, record outcomes and insert newly discovered URLs in one transaction, enqueue the new URLs, then commit the messages. |
-| FR10 | Retry every I/O operation with exponential backoff, jitter, and a per-attempt timeout. |
-| FR11 | Consult a politeness policy before each fetch; `0` means fetch now, a positive value means defer that URL. |
-| FR12 | Dead-letter messages that could not be completed. |
-| FR13 | Recover abandoned work: a URL left `queued` too long, or `started_crawl` too long, becomes claimable again. |
-| FR14 | Exit cleanly on `Ctrl+C`, releasing the database and the HTTP session. |
+The brief, taken from its opening paragraph, asks for exactly three things.
+
+| # | Requirement | How it is met |
+|---|---|---|
+| FR1 | Given a starting URL, visit each URL found on the same domain. | The seed is the only entry point; the crawl follows links outward from it and runs until interrupted. |
+| FR2 | Print each URL visited, and a list of the links found on that page. | The logger writes one `INFO` line per page: the URL visited and the links extracted from it. |
+| FR3 | Reject external links; the crawl is limited to one subdomain. | Scope is hostname **equality**, so a link to `monzo.com`, `community.monzo.com` or `facebook.com` is dropped and never fetched. Relative and absolute `href` values are both resolved, against the page they were found on. |
 
 ## Non-Functional Requirements
 
@@ -77,7 +68,7 @@ src/webcrawler/
     worker.py                              the consumer: peek a batch, crawl it concurrently, record, commit
   domain/
     custom_url.py                          immutable canonical URL; identity is scheme+host+port+path+query
-    crawl_state.py                         the four persisted row states
+    crawl_state.py                         the four row states: not_crawled, queued, started_crawl, finished_crawl
     messages.py                            frozen queue message, plus the queue-overflow error
     base_result.py                         success/failure verdict handed back to a politeness policy
     errors.py                              the two retry verdicts: non-retryable, retryable status
