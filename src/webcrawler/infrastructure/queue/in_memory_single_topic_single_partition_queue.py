@@ -12,11 +12,11 @@ from typing import Final
 from webcrawler.domain.messages import BaseMessage, QueueOverflowError
 
 # The crawl topic's capacity, in messages.
-DEFAULT_MAX_SIZE: Final = 10_000
+DEFAULT_MAX_SIZE: Final = 1000000
 
 # The deadletter capacity, bounded the same way but independently, so a full
 # crawl topic still has somewhere to park a message that must not be retried.
-DEFAULT_MAX_DEADLETTER_SIZE: Final = 10_000
+DEFAULT_MAX_DEADLETTER_SIZE: Final = 1000000
 
 
 class InMemorySingleTopicSinglePartitionQueue:
