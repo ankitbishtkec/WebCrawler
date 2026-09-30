@@ -25,11 +25,13 @@ from webcrawler.ports.topic_reader import TopicReader
 from webcrawler.ports.url_state_repository import URLStateRepository
 from webcrawler.ports.web_page_fetcher import WebPageFetcher
 
-# The fetches allowed in flight at once; a task holds a slot for its whole
-# retry budget, so this bounds concurrent requests, not concurrent tasks.
-DEFAULT_MAX_CONCURRENT_FETCHES: int = 500
-# The flush loop's period, so statuses wait this long before the store sees them.
-DEFAULT_FLUSH_INTERVAL_SECONDS: float = 0.5
+# The fetches allowed in flight at once, 1000 by default; a task holds a slot
+# for its whole retry budget, so this bounds concurrent requests, not tasks.
+DEFAULT_MAX_CONCURRENT_FETCHES: int = 1000
+# The flush loop's period, 10ms by default. Short on purpose: the window is the
+# wait between a page's links being found and those links becoming crawlable, so
+# it paces a deep discovery chain, while a wide one never waits for it at all.
+DEFAULT_FLUSH_INTERVAL_SECONDS: float = 0.01
 
 
 class CrawlerWorkerV1(CrawlWorker):
@@ -38,15 +40,17 @@ class CrawlerWorkerV1(CrawlWorker):
     The `CrawlWorker` that does not wait for its batch; `CrawlerWorker` in
     `application/worker.py` is the other one, and `main.py` picks either.
 
-    Why prefer this worker ? `CrawlerWorker` picks a batch of URLs and waits for every
-    one of them before it picks up new work, so a single slow site leaves the
-    crawler idle until it answers. This one never waits: it keeps taking new
+    Why prefer this worker? `CrawlerWorker` picks a batch of URLs and waits for
+    every one of them before it picks up new work, so a single slow site leaves
+    the crawler idle until it answers. This one never waits: it keeps taking new
     crawl requests while the earlier ones are still in flight, and holds at most
-    `max_concurrent_fetches` fetches at a time, 500 by default. The dependencies
-    and their interactions are otherwise the same as `CrawlerWorker`'s. The bulk
-    writes are the same idea on a timer instead of on a batch: `CrawlerWorker`
-    saved to the database only when every URL of a batch was done, where this one
-    collects the writes for 0.5 seconds and then makes them in bulk.
+    `max_concurrent_fetches` fetches at a time, 1000 by default. It also looks at
+    the queue every 10ms rather than once a second, so a link found on one page
+    is crawlable almost at once. The dependencies and their interactions are
+    otherwise the same as `CrawlerWorker`'s. The bulk writes are the same idea on
+    a timer instead of on a batch: `CrawlerWorker` saved to the database only when
+    every URL of a batch was done, where this one collects the writes for 10ms
+    and then makes them in bulk.
 
     `run` returns only on cancellation, since a crawl ends when the operator
     interrupts it, and `close` writes whatever the detached crawls left in the
@@ -65,7 +69,12 @@ class CrawlerWorkerV1(CrawlWorker):
         *,
         producer: TopicProducer,
         batch_size: int,
-        idle_sleep_seconds: float = 1.0,
+        # 10ms, where `CrawlerWorker` waits a second: this worker empties its
+        # queue as fast as it fills it, and a long sleep here is the price of
+        # that, since a message that arrives during the sleep waits for it.
+        # long sleep becomes a penalty for its eagerly crawling pages. We wanted
+        # it to be not a penalty so reduced it.
+        idle_sleep_seconds: float = 0.01,
         reschedule_delay: timedelta = timedelta(minutes=1),
         re_crawl_interval: timedelta | None = None,
         max_concurrent_fetches: int = DEFAULT_MAX_CONCURRENT_FETCHES,

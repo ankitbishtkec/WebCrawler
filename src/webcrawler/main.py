@@ -115,7 +115,7 @@ async def main() -> None:
     print(
         f"Pick the worker: 1 = {WORKER_CHOICES['1'].__name__}, which waits for "
         f"each batch to finish. 2 = {WORKER_CHOICES['2'].__name__}, which keeps "
-        f"fetching while earlier pages are still in flight, up to 500 at a "
+        f"fetching while earlier pages are still in flight, up to 1000 at a "
         f"time. Press Enter for default worker that is 1."
     )
     worker_choice = input("worker> ").strip() or DEFAULT_WORKER_CHOICE

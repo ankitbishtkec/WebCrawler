@@ -38,9 +38,9 @@ worthless as a design document.
 
 | # | Requirement | Status |
 |---|---|---|
-| NFR1 | **Concurrent.** Many pages are fetched at once, not one after another. | Met. `CrawlerWorker` fetches all 50 messages of a batch in one `asyncio.TaskGroup`; `CrawlerWorkerV1` detaches a crawl per message and holds up to 500 fetches in flight. Both on a single event loop. |
+| NFR1 | **Concurrent.** Many pages are fetched at once, not one after another. | Met. `CrawlerWorker` fetches all 50 messages of a batch in one `asyncio.TaskGroup`; `CrawlerWorkerV1` detaches a crawl per message and holds up to 1000 fetches in flight. Both on a single event loop. |
 | NFR2 | **Fetch fairly, without saturating the host.** Do not hammer a site. | **Not met.** The shipped `NoOpPolitenessPolicy` answers `0` for every URL, so nothing throttles. The interface and the deferral path exist, so a delaying policy drops in without touching the worker, but no such policy is written. See Opportunities. |
-| NFR3 | **Not overly saturate the crawled website.** | Partial. Retries back off exponentially with jitter, and a failed URL waits 5 minutes before it is due again, so a rate-limited host is not retried in a tight loop. There is no per-host concurrency cap and no `robots.txt` check. |
+| NFR3 | **Not overly saturate the crawled website.** | Partial. Retries back off exponentially with jitter, and a failed URL waits 5 minutes before it is due again, so a rate-limited host is not retried in a tight loop. `CrawlerWorkerV1`'s cap is 1000 fetches in flight and it is **process-wide, not per host**, so on a single-host crawl all 1000 can land on one site: against a local test server that served 150ms pages, 65 of 4000 URLs exhausted the 12s fetch timeout at that setting. There is no `robots.txt` check. |
 | NFR4 | **Modular.** Each concern in its own module, not one service per module. | Met. Modules in separate folders, all on one event loop. |
 | NFR5 | **Scalable to higher traffic.** | Met by substitution, not by size. The store, queue, and fetcher sit behind interfaces, so the process scales by swapping them; the shipped crawler is single-process and runs one worker, whichever of the two is chosen. |
 | NFR6 | **Composition over inheritance.** | Met. Collaborators are constructor arguments. The classes that extend a port are the store and the two workers, and nothing extends them in turn. |
@@ -75,7 +75,7 @@ the only place that knows which implementation is in use.
 | **db poller** (`application/url_poller.py`) | Asks the store which URLs are due, marks them `queued` in one bulk statement, and feeds them to the queue. |
 | **queue** (`infrastructure/queue/`) | Holds the pending work between the poller and the worker, as a bounded buffer with a separate parking area for messages that must not be retried. |
 | **crawl worker** (`application/worker.py`) | `CrawlerWorker`, the batch consumer. Takes a batch off the queue, fetches every page in it concurrently, extracts the links, records the outcome, and commits. |
-| **non-blocking crawl worker** (`application/worker_v1.py`) | `CrawlerWorkerV1`, the other `CrawlWorker`. Detaches a crawl per message and commits the batch at once, so a slow page never holds new work back, and writes the store in bulk on a 0.5s timer. |
+| **non-blocking crawl worker** (`application/worker_v1.py`) | `CrawlerWorkerV1`, the other `CrawlWorker`. Detaches a crawl per message and commits the batch at once, so a slow page never holds new work back, and writes the store in bulk on a 10ms timer. |
 | **orchestrator** (`application/orchestrator.py`) | Seeds the crawl once, then runs the poller and the worker together and stops both when either fails. |
 | **main** (`main.py`) | The composition root. Reads the seed and the worker's choice, constructs every object with its concrete class, runs the orchestrator, and releases everything on the way out. |
 
@@ -267,7 +267,7 @@ The choices that are not obvious from the code, each with what it cost.
 | Two retry settings, not one | A locked database frees in milliseconds; a 429 clears only on a seconds-scale window. One value fitted neither: it spent the whole fetch budget in 1.5s of backoff. | Two constants to keep coherent, and the fetch budget must stay under `JOB_TIMEOUT` or a still-retrying URL is claimed twice. |
 | A politeness wait defers, it never sleeps | One slow URL must not stall a batch, so the URL is rescheduled as `now + wait_ms` and the batch moves on. | A delaying policy is therefore not a throttle, it is a scheduler hint. Real pacing would need the cap in NFR2. |
 | Two workers behind one `CrawlWorker` port, picked at the prompt | They lose in opposite directions. The batch worker is ahead when every page answers in milliseconds; the non-blocking one is far ahead when one page stalls, since the batch worker leaves its whole batch waiting. Which case a run hits is not knowable before the run. | The operator chooses per run, and the two have to be kept at behavioural parity, since the port declares them the same worker. |
-| Bulk writes on a timer, not on a batch boundary | Waiting for a batch delays every write by its slowest fetch, and the non-blocking worker has no batch to wait for. | A write lands up to `flush_interval_seconds` late, and a crash inside that window leaves those rows for `job_timeout` to reclaim. |
+| Bulk writes on a timer, not on a batch boundary | Waiting for a batch delays every write by its slowest fetch, and the non-blocking worker has no batch to wait for. | A write lands up to `flush_interval_seconds` late, and a crash inside that window leaves those rows for `job_timeout` to reclaim. The period is 10ms, which is past the knee: on a chain-shaped site 0.5s managed 20 pages in 20s where 10ms managed 335, but going from 50ms to 10ms bought only 1.4x more, because the per-page fetch and store cost starts to dominate the window. |
 | Dedupe with sets and dicts, keyed by canonical URL | Two spellings of one page are the same string, so a duplicate is impossible by construction rather than something to check for. `times_crawled` can then be trusted as a re-crawl detector. | A URL that is both finished and discovered in one batch is written once, so the finish update has to win over the insert. |
 | One crawlable predicate shared by the read and the claim | Two copies of that SQL would eventually disagree, and the disagreement would be silent. | None, once it is one string. |
 | Bulk statements chunked under SQLite's parameter limit | A 1200-URL batch exceeds the 999 bound-parameter ceiling, so statements are chunked, each binding the remaining limit so chunking cannot overshoot `max_items`. | Bound to SQLite. Postgres has no such ceiling, so the chunking becomes unnecessary rather than wrong. |
@@ -330,19 +330,25 @@ starts.
 Next it asks which worker to use, the same prompt every run:
 
 ```
-worker> Pick the worker: 1 = CrawlerWorker, which waits for each batch to finish. 2 = CrawlerWorkerV1, which keeps fetching while earlier pages are still in flight, up to 500 at a time. Press Enter for 1.
+worker> Pick the worker: 1 = CrawlerWorker, which waits for each batch to finish. 2 = CrawlerWorkerV1, which keeps fetching while earlier pages are still in flight, up to 1000 at a time. Press Enter for 1.
 ```
 
 Press Enter for `CrawlerWorker`, or type `2` for `CrawlerWorkerV1`. They also
 differ in when they write: `CrawlerWorker` writes once per finished batch,
-while `CrawlerWorkerV1` writes every 0.5s whatever is buffered. Neither is
-faster on every site: on a local site with 150ms responses and a 6-second stall
-every twentieth page, `CrawlerWorkerV1` crawled all 4000 pages in 40s while
-`CrawlerWorker` managed 317, because it left 3066 claimed rows waiting behind
-the slow pages. On a site where every page answers in milliseconds,
-`CrawlerWorker` was about twice as fast, since `CrawlerWorkerV1`'s 0.5s write
-window sits between "links found" and "links crawlable" and nothing is slow
-enough to overlap it.
+while `CrawlerWorkerV1` writes every 10ms whatever is buffered, and it looks at
+the queue every 10ms rather than once a second. On the demo site,
+`CrawlerWorkerV1` crawled 18381 pages where `CrawlerWorker` crawled 4856 in the
+same 35s, because a fast site spends most of its time waiting for links it has
+already found to become crawlable, and 10ms of window is nearly no wait. On a
+local site with 150ms responses and a 6-second stall every twentieth page the
+gap is far wider: `CrawlerWorkerV1` crawled all 4000 pages where `CrawlerWorker`
+managed 321, because it left 3066 claimed rows waiting behind the slow pages.
+
+Both settings of `CrawlerWorkerV1` are aggressive, and 1000 fetches against one
+host can outrun it: on that same local site 65 of the 4000 URLs exhausted the
+12s fetch timeout, so those pages were rescheduled and their messages
+dead-lettered. Pass a lower `max_concurrent_fetches`, and a longer
+`flush_interval_seconds`, for a gentler crawl.
 
 Add `--debug` for `DEBUG` logging instead of `INFO`:
 
@@ -447,7 +453,7 @@ deactivate                            # leave the virtual environment
   a real rate-limiting policy drops in without touching the worker.
 - **Two workers, one port.** `CrawlerWorker` waits for a whole batch and writes
   once at the end of it; `CrawlerWorkerV1` detaches a crawl per message, holds up
-  to 500 fetches in flight and writes the store every 0.5s. `main.py` asks which
+  to 1000 fetches in flight and writes the store every 10ms. `main.py` asks which
   one to build, and the orchestrator only ever calls `run` and `close`.
 - **Retry belongs to the I/O modules.** The store and the fetcher each hold a
   policy; the poller and the worker hold none, so nothing is retried twice. The
