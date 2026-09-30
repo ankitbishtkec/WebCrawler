@@ -380,7 +380,7 @@ classDiagram
     %% Value types held or passed.
     %% ---------------------------------------------------------------------
 
-    BaseMessage *-- CustomURL
+    BaseMessage --> CustomURL : holds
 
     %% Raises, not extends. Dotted so the arrowhead cannot be read as
     %% inheritance: CustomURL does not inherit from InvalidURLError.
@@ -401,7 +401,7 @@ classDiagram
     SQLiteURLStateRepository ..> CrawlState : writes
     TopicProducer ..> BaseMessage : carries
     TopicReader ..> BaseMessage : returns
-    InMemorySingleTopicSinglePartitionQueue *-- BaseMessage : stores
+    InMemorySingleTopicSinglePartitionQueue --> BaseMessage : holds in its deques
     CrawlerWorker ..> BaseMessage : peeks, crawls, commits
     CrawlerWorkerV1 ..> BaseMessage : peeks, crawls, commits
     URLPoller ..> BaseMessage : builds one per claimed URL
