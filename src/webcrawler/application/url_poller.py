@@ -7,7 +7,6 @@ state machine, no lock, and no dedupe gate of its own.
 
 import asyncio
 import logging
-import uuid
 from datetime import datetime, timedelta
 
 from webcrawler.domain.custom_url import CustomURL
@@ -65,8 +64,6 @@ class URLPoller(CrawlQueuer):
     async def run(self) -> None:
         """Poll the store forever, one claim and one bulk feed per poll.
 
-        Each poll mints a fresh request id, so a broker could dedupe the feed.
-
         Raises:
             asyncio.CancelledError: When the task is cancelled, which is how
             the orchestrator stops the poller.
@@ -96,10 +93,7 @@ class URLPoller(CrawlQueuer):
         The shared body of all three entry points, so one guard covers them all.
 
         Args:
-            request_id: The id handed to the bulk feed, or None to mint one
-                here. Only `run` supplies a stable id, one per poll check; the
-                APIs default to a fresh id, because a caller retrying without
-                an id is a genuinely new request, not a repeat.
+            request_id: The caller's dedupe key, forwarded to the queue, which ignores it.
             now: The instant the claim's predicates are evaluated against.
             urls: The caller's own URLs, or None to claim candidates. A
                 caller's list is already the batch, so `enqueue_urls` passes it
@@ -182,8 +176,7 @@ class URLPoller(CrawlQueuer):
             urls: The URLs to queue, expected to exist as rows already, which
                 is why this claims and never inserts. A URL listed twice is
                 claimed and queued once.
-            request_id: The id handed to the bulk feed, or None to mint a
-                fresh one inside.
+            request_id: The caller's dedupe key, forwarded to the queue, which ignores it.
 
         Raises:
         Exception: Nothing is raised
@@ -207,7 +200,7 @@ class URLPoller(CrawlQueuer):
 
         Args:
             now: The instant the claim's predicates are evaluated against.
-            request_id: The id handed to the bulk feed.
+            request_id: The caller's dedupe key, forwarded to the queue, which ignores it.
             max_items: This call's row limit, or None to fall back to
                 `max_items_to_queue`.
 
