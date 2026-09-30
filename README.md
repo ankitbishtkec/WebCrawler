@@ -143,6 +143,51 @@ The queue deliberately keeps the parameters a real broker needs, `topic`,
 while ignoring them, so the in-memory default can be swapped without a caller
 noticing.
 
+### Database schema
+
+One table, `urls`, in `webcrawler.db`. Every timestamp is a UTC `TEXT` in
+SQLite's `YYYY-MM-DD HH:MM:SS` form, which sorts correctly as a string and lets
+`CURRENT_TIMESTAMP` be used as a default.
+
+| Column | Type | Null | Default | Meaning |
+|---|---|---|---|---|
+| `custom_url` | `TEXT` | no | | **Primary key.** The canonical URL text itself, not a surrogate id. |
+| `created_time` | `TEXT` | no | `CURRENT_TIMESTAMP` | When the crawler first learned the URL. |
+| `last_crawl_time` | `TEXT` | yes | | When a worker last began crawling it. `NULL` until the first attempt. |
+| `next_crawl_time` | `TEXT` | yes | `CURRENT_TIMESTAMP` | The earliest time the URL may be claimed. Set equal to `created_time` on insert, so a new row is immediately claimable. |
+| `state` | `TEXT` | no | `'not_crawled'` | One of `not_crawled`, `queued`, `started_crawl`, `finished_crawl`. |
+| `last_status_update_time` | `TEXT` | no | `CURRENT_TIMESTAMP` | When the row last changed state. The two staleness timeouts compare against this. |
+| `times_crawled` | `INTEGER` | no | `0` | Incremented once per completed crawl. Makes a re-crawl loop visible in the data alone. |
+
+Using the canonical text as the key is what makes the primary key do the dedupe:
+two spellings of one URL are the same string, so a collision is impossible rather
+than something the code has to check for.
+
+**Indexes.** Three exist, one of them SQLite's own for the primary key:
+
+| Index | Columns | Serves |
+|---|---|---|
+| `sqlite_autoindex_urls_1` | `custom_url` | the primary key lookup |
+| `idx_urls_state_next` | `(state, next_crawl_time)` | claiming due URLs, which orders by `next_crawl_time` |
+| `idx_urls_state_status` | `(state, last_status_update_time)` | the two staleness branches, which range over `last_status_update_time` within one state |
+
+The second index is why the staleness comparison is written against the bare
+column rather than wrapped in `strftime(...)`. A function on the column would stop
+the index matching. The query plan confirms both are used, and that a combined
+crawlable selection is served as a `MULTI-INDEX OR` across the two:
+
+```
+SEARCH urls USING INDEX idx_urls_state_status (state=?)
+SEARCH urls USING INDEX idx_urls_state_next  (state=? AND next_crawl_time<?)
+```
+
+**What is deliberately absent.** There is no `NOT NULL` on `next_crawl_time`,
+because a finished URL is stored as `NULL` to mean "never again" and the
+predicate's `next_crawl_time <= :now` is never true for `NULL`. There is also no
+`state NOT IN (...)` guard on the claim, because it would permanently exclude the
+two staleness branches that recover abandoned work. A top-level
+`next_crawl_time IS NOT NULL` guard would do the same damage.
+
 ### `pyproject.toml`
 
 The single project file; there is no `setup.py`, `requirements.txt`, or
