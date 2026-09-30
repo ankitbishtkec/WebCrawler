@@ -44,17 +44,28 @@ DB_FILE: str = "webcrawler.db"
 BATCH_SIZE: int = 50
 JOB_TIMEOUT: timedelta = timedelta(minutes=1)
 QUEUE_TIMEOUT: timedelta = timedelta(seconds=30)
-RESCHEDULE_DELAY: timedelta = timedelta(minutes=1)
+# A failed URL waits this long before it is due again, so a site that is
+# rate limiting the crawl gets a quiet window instead of one burst a minute.
+RESCHEDULE_DELAY: timedelta = timedelta(minutes=5)
 TOPIC: str = "crawl"
 CONSUMER_GROUP_ID: str = "crawler"
-RETRY_SETTINGS: RetrySettings = RetrySettings(
+# The store and the fetcher need opposite retry shapes, so they get their own
+# settings: a locked database comes free in milliseconds, while a 429 is only
+# cleared on a seconds-scale window.
+STORE_RETRY_SETTINGS: RetrySettings = RetrySettings(
     max_attempts=3,
-    base_delay_seconds=0.5,
-    max_delay_seconds=8.0,
-    jitter_seconds=0.5,
+    base_delay_seconds=0.2,
+    max_delay_seconds=1.0,
+    jitter_seconds=0.1,
+    timeout_seconds=12.0)
+FETCH_RETRY_SETTINGS: RetrySettings = RetrySettings(
+    max_attempts=3,
+    base_delay_seconds=5.0,
+    max_delay_seconds=60.0,
+    jitter_seconds=5.0,
     timeout_seconds=12.0)
 #a bit lower timeout for http call is used compared to the task object timeout
-HTTP_CALL_TIMEOUT_SECONDS: int = RETRY_SETTINGS.timeout_seconds - 2.0
+HTTP_CALL_TIMEOUT_SECONDS: int = FETCH_RETRY_SETTINGS.timeout_seconds - 2.0
 # The seed used when the operator just presses Enter at the prompt.
 DEFAULT_SEED_URL: str = "https://crawlme.monzo.com"
 # Several sites answer 503 to a non-browser agent, so the crawler presents as
@@ -88,9 +99,10 @@ async def main() -> None:
     queue = InMemorySingleTopicSinglePartitionQueue()
     producer = InMemoryTopicProducer(TOPIC, queue)
     reader = InMemoryTopicReader(TOPIC, CONSUMER_GROUP_ID, queue)
-    # One retry policy, two owners: the store and the fetches.
-    retry_policy = ExponentialBackoffRetryPolicy(RETRY_SETTINGS)
-    repository = SQLiteURLStateRepository(DB_FILE, retry_policy, time_provider)
+    # One retry policy per I/O owner; the store is quick, the fetches are slow.
+    store_retry_policy = ExponentialBackoffRetryPolicy(STORE_RETRY_SETTINGS)
+    repository = SQLiteURLStateRepository(
+        DB_FILE, store_retry_policy, time_provider)
     worker: CrawlerWorker | None = None
     # This file builds what the run needs, so this is where they are released.
     try:
@@ -99,9 +111,10 @@ async def main() -> None:
         # belongs here too (README's Extensions section).
         request_middlewares: tuple[RequestMiddleware, ...] = (
             HeadersMiddleware(DEFAULT_HEADERS),)
+        fetch_retry_policy = ExponentialBackoffRetryPolicy(FETCH_RETRY_SETTINGS)
         fetcher = AiohttpWebPageFetcher(
             HTTP_CALL_TIMEOUT_SECONDS,
-            retry_policy,
+            fetch_retry_policy,
             middlewares=request_middlewares)
         link_extractor = HtmlLinkExtractor()
         # No wait is ever requested, so a crawl is not throttled; a delaying policy
