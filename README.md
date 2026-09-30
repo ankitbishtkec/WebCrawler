@@ -168,6 +168,19 @@ domain(aka models)  <-  ports(aka interfaces)
                                                                +-->  utils
 ```
 
+### Class diagram
+
+The eleven ports, the twelve implementations, and the arrows between them.
+`*--` is a constructor-held collaborator, `<|--` is an implementation of a
+port, and `..>` is a type used only in a signature.
+
+![The eleven ports and twelve implementations of the crawler, with the two workers behind the CrawlWorker port and main.py as the composition root](docs/uml.png)
+
+The diagram is generated, so it is stored twice on purpose: the image is what
+every markdown reader can show, and [`docs/uml.mmd`](docs/uml.mmd) is the
+editable source. After changing the source, render it again and overwrite the
+image, or the two drift apart silently.
+
 ### Extending it
 
 Every boundary is an `ABC`, so a replacement is a new class plus one line in
@@ -330,19 +343,21 @@ starts.
 Next it asks which worker to use, the same prompt every run:
 
 ```
-worker> Pick the worker: 1 = CrawlerWorker, which waits for each batch to finish. 2 = CrawlerWorkerV1, which keeps fetching while earlier pages are still in flight, up to 1000 at a time. Press Enter for 1.
+worker> Pick the worker: 1 = CrawlerWorker, which waits for each batch to finish. 2 = CrawlerWorkerV1, which keeps fetching while earlier pages are still in flight, up to 1000 at a time. Press Enter for CrawlerWorkerV1.
 ```
 
-Press Enter for `CrawlerWorker`, or type `2` for `CrawlerWorkerV1`. They also
-differ in when they write: `CrawlerWorker` writes once per finished batch,
-while `CrawlerWorkerV1` writes every 10ms whatever is buffered, and it looks at
-the queue every 10ms rather than once a second. On the demo site,
+Press Enter for `CrawlerWorkerV1`, the default, or type `1` for the batch worker.
+They also differ in when they write: `CrawlerWorker` writes once per finished
+batch, while `CrawlerWorkerV1` writes every 10ms whatever is buffered, and it
+looks at the queue every 10ms rather than once a second. On the demo site,
 `CrawlerWorkerV1` crawled 18381 pages where `CrawlerWorker` crawled 4856 in the
 same 35s, because a fast site spends most of its time waiting for links it has
 already found to become crawlable, and 10ms of window is nearly no wait. On a
 local site with 150ms responses and a 6-second stall every twentieth page the
 gap is far wider: `CrawlerWorkerV1` crawled all 4000 pages where `CrawlerWorker`
 managed 321, because it left 3066 claimed rows waiting behind the slow pages.
+That is why `CrawlerWorkerV1` is the default: it won both, and the batch worker
+is kept for a caller that wants one batch's outcome in one transaction.
 
 Both settings of `CrawlerWorkerV1` are aggressive, and 1000 fetches against one
 host can outrun it: on that same local site 65 of the 4000 URLs exhausted the

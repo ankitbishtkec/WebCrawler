@@ -76,14 +76,14 @@ FETCH_RETRY_SETTINGS: RetrySettings = RetrySettings(
 HTTP_CALL_TIMEOUT_SECONDS: int = FETCH_RETRY_SETTINGS.timeout_seconds - 2.0
 # The seed used when the operator just presses Enter at the prompt.
 DEFAULT_SEED_URL: str = "https://crawlme.monzo.com"
-# The workers the operator picks at the prompt, keyed by what they type, and
-# the one an empty or unrecognised answer falls back to: it crawls a batch of
-# URLs and waits for all of them before taking more, so a slow site idles it.
+# The workers the operator picks at the prompt, keyed by what they type. The
+# default is the non-blocking one, since it measured faster on both sites tried:
+# the batch worker idles behind the slowest page of the batch it is holding.
 WORKER_CHOICES: dict[str, type[CrawlWorker]] = {
     "1": CrawlerWorker,
     "2": CrawlerWorkerV1,
 }
-DEFAULT_WORKER_CHOICE: str = "1"
+DEFAULT_WORKER_CHOICE: str = "2"
 # Several sites answer 503 to a non-browser agent, so the crawler presents as
 # a normal browser.
 async def main() -> None:
@@ -111,12 +111,14 @@ async def main() -> None:
         )
     seed_line = input("seed url> ").strip() or DEFAULT_SEED_URL
     # The worker's behaviour is the operator's choice. Only the difference the
-    # operator has to act on goes in the prompt; the rest is in the README.
+    # operator has to act on goes in the prompt; the rest is in the README. The
+    # default is named from the key, so the two cannot drift apart.
     print(
         f"Pick the worker: 1 = {WORKER_CHOICES['1'].__name__}, which waits for "
         f"each batch to finish. 2 = {WORKER_CHOICES['2'].__name__}, which keeps "
         f"fetching while earlier pages are still in flight, up to 1000 at a "
-        f"time. Press Enter for default worker that is 1."
+        f"time. Press Enter for "
+        f"{WORKER_CHOICES[DEFAULT_WORKER_CHOICE].__name__}."
     )
     worker_choice = input("worker> ").strip() or DEFAULT_WORKER_CHOICE
     if worker_choice not in WORKER_CHOICES:

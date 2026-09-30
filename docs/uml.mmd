@@ -149,6 +149,14 @@ classDiagram
         <<error>>
     }
 
+    class RuntimeError {
+        <<builtin>>
+    }
+
+    class ValueError {
+        <<builtin>>
+    }
+
     %% ---------------------------------------------------------------------
     %% Application: the orchestrator and the two interchangeable consumers.
     %% ---------------------------------------------------------------------
@@ -270,6 +278,8 @@ classDiagram
         -int _max_size
         -int _max_deadletter_size
         +enqueue(message)
+        +peek(n) list~BaseMessage~
+        +commit(count)
         +enqueue_deadletter(message)
     }
 
@@ -305,9 +315,13 @@ classDiagram
     RequestMiddleware <|-- HeadersMiddleware
 
     %% ---------------------------------------------------------------------
-    %% Composition, held as constructor arguments. The worker and the poller
-    %% hold the same port instances, so at runtime worker._queuer is the
-    %% very URLPoller the orchestrator holds.
+    %% Held as constructor arguments.
+    %% Filled `*--` = composition, exclusive ownership. Only main.py does that,
+    %% because it is the module that constructs everything.
+    %% Hollow `o--` = aggregation, a shared instance. One store is held by the
+    %% orchestrator, the poller and whichever worker is running; one queue by
+    %% both adapters; one clock by four classes. So at runtime a worker's
+    %% _queuer is the very URLPoller the orchestrator holds.
     %% ---------------------------------------------------------------------
 
     Main *-- Orchestrator
@@ -324,34 +338,34 @@ classDiagram
     Main *-- URLPoller
     Main *-- CrawlWorker
 
-    Orchestrator *-- URLStateRepository
-    Orchestrator *-- URLPoller
-    Orchestrator *-- CrawlWorker
+    Orchestrator o-- URLStateRepository
+    Orchestrator o-- URLPoller
+    Orchestrator o-- CrawlWorker
 
-    URLPoller *-- URLStateRepository
-    URLPoller *-- TopicProducer
-    URLPoller *-- TimeProviderFactory
+    URLPoller o-- URLStateRepository
+    URLPoller o-- TopicProducer
+    URLPoller o-- TimeProviderFactory
 
-    CrawlerWorker *-- URLStateRepository
-    CrawlerWorker *-- TopicReader
-    CrawlerWorker *-- TopicProducer
-    CrawlerWorker *-- WebPageFetcher
-    CrawlerWorker *-- LinkExtractor
-    CrawlerWorker *-- PolitenessPolicy
-    CrawlerWorker *-- CrawlQueuer
-    CrawlerWorker *-- TimeProviderFactory
+    CrawlerWorker o-- URLStateRepository
+    CrawlerWorker o-- TopicReader
+    CrawlerWorker o-- TopicProducer
+    CrawlerWorker o-- WebPageFetcher
+    CrawlerWorker o-- LinkExtractor
+    CrawlerWorker o-- PolitenessPolicy
+    CrawlerWorker o-- CrawlQueuer
+    CrawlerWorker o-- TimeProviderFactory
 
-    CrawlerWorkerV1 *-- URLStateRepository
-    CrawlerWorkerV1 *-- TopicReader
-    CrawlerWorkerV1 *-- TopicProducer
-    CrawlerWorkerV1 *-- WebPageFetcher
-    CrawlerWorkerV1 *-- LinkExtractor
-    CrawlerWorkerV1 *-- PolitenessPolicy
-    CrawlerWorkerV1 *-- CrawlQueuer
-    CrawlerWorkerV1 *-- TimeProviderFactory
+    CrawlerWorkerV1 o-- URLStateRepository
+    CrawlerWorkerV1 o-- TopicReader
+    CrawlerWorkerV1 o-- TopicProducer
+    CrawlerWorkerV1 o-- WebPageFetcher
+    CrawlerWorkerV1 o-- LinkExtractor
+    CrawlerWorkerV1 o-- PolitenessPolicy
+    CrawlerWorkerV1 o-- CrawlQueuer
+    CrawlerWorkerV1 o-- TimeProviderFactory
 
     SQLiteURLStateRepository *-- RetryPolicy
-    SQLiteURLStateRepository *-- TimeProviderFactory
+    SQLiteURLStateRepository o-- TimeProviderFactory
     AiohttpWebPageFetcher *-- RetryPolicy
     AiohttpWebPageFetcher *-- RequestMiddleware
     ExponentialBackoffRetryPolicy *-- RetrySettings
@@ -359,8 +373,8 @@ classDiagram
     %% The only concrete-to-concrete edges in the graph. The queue has no
     %% port, so both adapters import it directly, and main.py is the only
     %% thing that guarantees both hold the same instance.
-    InMemoryTopicProducer *-- InMemorySingleTopicSinglePartitionQueue
-    InMemoryTopicReader *-- InMemorySingleTopicSinglePartitionQueue
+    InMemoryTopicProducer o-- InMemorySingleTopicSinglePartitionQueue
+    InMemoryTopicReader o-- InMemorySingleTopicSinglePartitionQueue
 
     %% ---------------------------------------------------------------------
     %% Value types held or passed.
@@ -370,21 +384,37 @@ classDiagram
 
     %% Raises, not extends. Dotted so the arrowhead cannot be read as
     %% inheritance: CustomURL does not inherit from InvalidURLError.
+    ValueError <|-- InvalidURLError
+    RuntimeError <|-- QueueOverflowError
+    RuntimeError <|-- NonRetryableError
+    RuntimeError <|-- RetryableStatusError
+
     CustomURL ..> InvalidURLError : raises
     InMemorySingleTopicSinglePartitionQueue ..> QueueOverflowError : raises
     RetryPolicy ..> NonRetryableError : re-raises at once
     RetryPolicy ..> RetryableStatusError : retried
-    AiohttpWebPageFetcher ..> NonRetryableError : raises on 4xx
+    AiohttpWebPageFetcher ..> NonRetryableError : raises outside 200-299
     AiohttpWebPageFetcher ..> RetryableStatusError : raises on retryable status
 
     PolitenessPolicy ..> BaseResult : passes
-    SQLiteURLStateRepository *-- RetryPolicy
     URLStateRepository ..> CustomURL : keys on
     SQLiteURLStateRepository ..> CrawlState : writes
     TopicProducer ..> BaseMessage : carries
     TopicReader ..> BaseMessage : returns
-    LinkExtractor ..> CustomURL : returns
-    WebPageFetcher ..> CustomURL : fetches
+    InMemorySingleTopicSinglePartitionQueue *-- BaseMessage : stores
+    CrawlerWorker ..> BaseMessage : peeks, crawls, commits
+    CrawlerWorkerV1 ..> BaseMessage : peeks, crawls, commits
+    URLPoller ..> BaseMessage : builds one per claimed URL
+
+    %% The implementations that key on, return, or write the domain types the
+    %% ports already name above them. Drawn on both sides deliberately: the
+    %% port states the contract, the implementation states the dependency.
+    SQLiteURLStateRepository ..> CustomURL : keys on
+    AiohttpWebPageFetcher ..> CustomURL : fetches
+    HtmlLinkExtractor ..> CustomURL : returns
+    NoOpPolitenessPolicy ..> CustomURL : asked about
+    NoOpPolitenessPolicy ..> BaseResult : records
+    HeadersMiddleware ..> CustomURL : applied per request
 
     %% ---------------------------------------------------------------------
     %% Notes on the parts a naive reading of the code gets wrong.
@@ -392,17 +422,17 @@ classDiagram
 
     note for Orchestrator "Holds the concrete URLPoller,<br>not the CrawlQueuer port.<br>Closes neither the worker nor the store:<br>main.py does that in a finally block."
 
-    note for CrawlerWorker "Batch worker.<br>mark_started is AWAITED before the fetches,<br>every crawl is awaited to completion,<br>then complete_crawl, then enqueue_urls,<br>then commit LAST."
+    note for CrawlerWorker "Batch worker, the non-default choice.<br>mark_started is AWAITED before the fetches,<br>every crawl is awaited to completion,<br>then complete_crawl, then enqueue_urls,<br>then commit LAST."
 
-    note for CrawlerWorkerV1 "Non-blocking worker, the alternative to CrawlerWorker,<br>never alongside it. CrawlerWorker is the default choice.<br>mark_started only fills a set; the store write happens in the<br>flush loop, on a timer of DEFAULT_FLUSH_INTERVAL_SECONDS.<br>commit happens as the tasks are CREATED,<br>before any crawl finishes.<br>Fetches bounded by a semaphore of DEFAULT_MAX_CONCURRENT_FETCHES,<br>not by the queue."
+    note for CrawlerWorkerV1 "Non-blocking worker and the default choice,<br>the alternative to CrawlerWorker, never alongside it.<br>mark_started only fills a set; the store write happens in the<br>flush loop, on a timer of DEFAULT_FLUSH_INTERVAL_SECONDS.<br>commit happens as the tasks are CREATED,<br>before any crawl finishes.<br>Fetches bounded by a semaphore of DEFAULT_MAX_CONCURRENT_FETCHES,<br>not by the queue."
 
     note for URLPoller "Only the claim is inside try/except.<br>The enqueue_many feed is unguarded and<br>a producer failure propagates to the caller."
 
     note for SQLiteURLStateRepository "One of twelve classes extending a port,<br>and the only one nothing extends in turn.<br>Owns its retry, a transaction lock, and the aiosqlite connection."
 
-    note for AiohttpWebPageFetcher "Owns its retry.<br>Middleware is a tuple applied synchronously<br>before each request, not an await point."
+    note for AiohttpWebPageFetcher "Owns its retry.<br>Middleware is a tuple applied synchronously<br>before each request, not an await point.<br>A status outside 200-299 raises, and only the seven in<br>RETRYABLE_STATUS_CODES are retried:<br>everything else, 3xx included, fails at once."
 
-    note for InMemorySingleTopicSinglePartitionQueue "No interface and no port, the one class here with no base.<br>Both adapters compose over one instance,<br>and neither subclasses it.<br>The deadletter half is never drained,<br>so its capacity is a memory ceiling."
+    note for InMemorySingleTopicSinglePartitionQueue "No interface and no port, the one class here with no base.<br>Both adapters aggregate over one instance,<br>and neither subclasses it.<br>peek(n) does not reserve, and commit(count) is head-based:<br>committing twice removes twice as many.<br>The deadletter half is never drained,<br>so its capacity is a memory ceiling."
 
     note for LinkExtractor "One of three synchronous ports,<br>with TimeProviderFactory and RequestMiddleware.<br>extract is not an await point."
 
