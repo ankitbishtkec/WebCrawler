@@ -45,7 +45,10 @@ BATCH_SIZE: int = 50
 # Must exceed the fetcher's whole retry budget, three attempts of 12s plus up
 # to 25s of backoff, or a URL still retrying is re-claimed and fetched twice.
 JOB_TIMEOUT: timedelta = timedelta(minutes=2)
-QUEUE_TIMEOUT: timedelta = timedelta(seconds=30)
+# A `queued` row older than this is re-claimed and re-queued, which is how a
+# message lost between the claim and the enqueue is recovered. It must outlast
+# a real backlog, or every waiting row is re-fetched while it still waits.
+QUEUE_TIMEOUT: timedelta = timedelta(minutes=60)
 # A failed URL waits this long before it is due again, so a site that is
 # rate limiting the crawl gets a quiet window instead of one burst a minute.
 RESCHEDULE_DELAY: timedelta = timedelta(minutes=5)
