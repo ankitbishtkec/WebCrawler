@@ -7,9 +7,6 @@ a mock that runs the one attempt it is given, and every assertion is on what
 the fetcher asked the session for. Where the attempt count is the point, the
 real `ExponentialBackoffRetryPolicy` drives the fetcher instead, because the
 count belongs to the policy and not to a double.
-
-Every test is `async def` and runs on the one event loop `pytest-asyncio` gives
-it, so a fetcher that holds a lock is never carried across two loops.
 """
 
 from collections.abc import Awaitable, Callable, Sequence
