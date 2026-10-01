@@ -84,7 +84,7 @@ the only place that knows which implementation is in use.
 | **orchestrator** (`application/orchestrator.py`) | Seeds the crawl once, then runs the poller and the worker together and stops both when either fails. |
 | **main** (`main.py`) | The composition root. Reads the seed and the worker's choice, constructs every object with its concrete class, runs the orchestrator, and releases everything on the way out. |
 
-Three supporting packages sit underneath those six:
+Three supporting packages sit underneath those seven:
 
 | Package | One-line description |
 |---|---|
@@ -621,7 +621,7 @@ Every boundary is an `ABC`, so a replacement is a new class plus one line in
 
 | Port | Shipped default | A new implementation must provide |
 |---|---|---|
-| `URLStateRepository` | `SQLiteURLStateRepository` | 7 async methods: `initialize`, `create_urls`, `close`, `get_crawlable_urls`, `claim_candidates`, `claim_urls`, `mark_started`, `complete_crawl` |
+| `URLStateRepository` | `SQLiteURLStateRepository` | 8 async methods: `initialize`, `create_urls`, `close`, `get_crawlable_urls`, `claim_candidates`, `claim_urls`, `mark_started`, `complete_crawl` |
 | `CrawlQueuer` | `URLPoller` | 3 async methods: `run`, `enqueue_urls`, `queue_candidates` |
 | `CrawlWorker` | `CrawlerWorker`, `CrawlerWorkerV1` | 2 async methods: `run`, `close` |
 | `TopicProducer` | `InMemoryTopicProducer` | 3 async methods: `enqueue`, `enqueue_many`, `enqueue_to_deadletter` |
@@ -707,10 +707,10 @@ The choices that are not obvious from the code, each with what it cost.
 | Decision | Why | What it cost |
 |---|---|---|
 | Modules in folders on one event loop, not a service per module | The brief asked for a production shape without a deployment's worth of moving parts. One process means one queue, one store, and no network hop between the poller and the worker. | No horizontal scale for free. Raising throughput means more workers, which needs a broker that honours the partition key. |
-| One batch, one transaction, one commit | `complete_crawl` writes every outcome and every discovered URL atomically, so a crash cannot leave a page recorded without its links. | A failed write loses the whole batch's outcomes, so the batch is deadlettered and its rows are left `started_crawl` for `job_timeout` to reclaim. |
-| `complete_crawl` before `enqueue_urls` before `commit` | Each step only after the one before it is durable. `enqueue_urls` claims the rows the insert created, and `commit` acknowledges work that is only finished once recorded. | None. The other orderings all double-fetch or lose work. |
+| One batch, one transaction, one commit | `complete_crawl` writes every outcome and every discovered URL atomically, so a crash cannot leave a page recorded without its links. | Only a worker that waits for its batch can afford it. `CrawlerWorkerV1` never waits, so a failed write leaves its rows `started_crawl` for `job_timeout` and its snapshot is dropped. |
+| `complete_crawl` before `enqueue_urls` before `commit`, in the batch worker | Each step only after the one before it is durable. `enqueue_urls` claims the rows the insert created, and `commit` acknowledges work that is only finished once recorded. | The batch worker can pay for it because it waits. `CrawlerWorkerV1` commits as its tasks are created, so it gets the throughput and gives up the ordering, recovering through `job_timeout` instead. |
 | A queue timeout stands in for a CDC pipeline | If a row reaches `queued` and the process dies before the message is sent, no change-data-capture stream exists to reconcile the two. A `queued` row older than `queue_timeout` is simply re-selected. | A lost message waits out the timeout. Set to 60 minutes, because at 30s a real backlog was being re-fetched while it still waited. |
-| Two retry settings, not one | A locked database frees in milliseconds; a 429 clears only on a seconds-scale window. One value fitted neither: it spent the whole fetch budget in 1.5s of backoff. | Two constants to keep coherent, and the fetch budget must stay under `JOB_TIMEOUT` or a still-retrying URL is claimed twice. |
+| Two retry settings, not one | A locked database frees in milliseconds; a 429 clears only on a seconds-scale window. One value fitted neither: it exhausted the whole attempt budget on backoff alone before a single page was tried. | Two constants to keep coherent, and the fetch budget must stay under `JOB_TIMEOUT` or a still-retrying URL is claimed twice. |
 | A politeness wait defers, it never sleeps | One slow URL must not stall a batch, so the URL is rescheduled as `now + wait_ms` and the batch moves on. | A delaying policy is therefore not a throttle, it is a scheduler hint. Real pacing would need a per-host cap, which the brief does not ask for. |
 | Two workers behind one `CrawlWorker` port, picked at the prompt | They lose in opposite directions. The batch worker is ahead when every page answers in milliseconds; the non-blocking one is far ahead when one page stalls, since the batch worker leaves its whole batch waiting. Which case a run hits is not knowable before the run. | The operator chooses per run, and the two have to be kept at behavioural parity, since the port declares them the same worker. |
 | Bulk writes on a timer, not on a batch boundary | Waiting for a batch delays every write by its slowest fetch, and the non-blocking worker has no batch to wait for. | A write lands up to `flush_interval_seconds` late, and a crash inside that window leaves those rows for `job_timeout` to reclaim. The period is 10ms, which is past the knee: on a chain-shaped site 0.5s managed 20 pages in 20s where 10ms managed 335, but going from 50ms to 10ms bought only 1.4x more, because the per-page fetch and store cost starts to dominate the window. |
@@ -787,14 +787,15 @@ looks at the queue every 10ms rather than once a second. On the demo site,
 same 35s, because a fast site spends most of its time waiting for links it has
 already found to become crawlable, and 10ms of window is nearly no wait. On a
 local site with 150ms responses and a 6-second stall every twentieth page the
-gap is far wider: `CrawlerWorkerV1` crawled all 4000 pages where `CrawlerWorker`
-managed 321, because it left 3066 claimed rows waiting behind the slow pages.
-That is why `CrawlerWorkerV1` is the default: it won both, and the batch worker
-is kept for a caller that wants one batch's outcome in one transaction.
+gap is far wider: in one 45s run `CrawlerWorkerV1` finished all 4000 pages,
+where `CrawlerWorker` finished 371 and left 3257 rows claimed and waiting behind
+the slow pages. That is why `CrawlerWorkerV1` is the default: it won both, and
+the batch worker is kept for a caller that wants one batch's outcome in one
+transaction.
 
 Both settings of `CrawlerWorkerV1` are aggressive, and 1000 fetches against one
-host can outrun it: on that same local site 65 of the 4000 URLs exhausted the
-12s fetch timeout, so those pages were rescheduled and their messages
+host can outrun it: on that same local site 70 of the 4000 URLs exhausted the
+12s fetch timeout in one run, so those pages were rescheduled and their messages
 dead-lettered. Pass a lower `max_concurrent_fetches`, and a longer
 `flush_interval_seconds`, for a gentler crawl.
 
@@ -893,9 +894,12 @@ deactivate                            # leave the virtual environment
   outcomes so one row is written once per batch, and a set of discovered links.
   A URL that is both finished and discovered in the same batch is written once,
   so `times_crawled` cannot jump.
-- **Ordering that survives a crash.** `complete_crawl` runs first, then
-  `enqueue_urls`, then `commit`, each step only after the one before it is
-  durable, so an interrupted batch resumes instead of duplicating work.
+- **Ordering that survives a crash.** In the batch worker the order is
+  `complete_crawl`, then `enqueue_urls`, then `commit`, each step only after the
+  one before it is durable, so an interrupted batch resumes rather than
+  duplicating work. `CrawlerWorkerV1` deliberately inverts the outer two: it
+  commits the batch as its crawl tasks are *created*, because it never waits for
+  them, and recovers through `job_timeout` rather than through an ordering.
 - **Politeness defers, it never sleeps.** A non-zero wait reschedules that one
   URL as `now + wait_ms` and moves on, so one slow URL cannot stall a batch, and
   a real rate-limiting policy drops in without touching the worker.
@@ -906,12 +910,16 @@ deactivate                            # leave the virtual environment
 - **Retry belongs to the I/O modules.** The store and the fetcher each hold a
   policy; the poller and the worker hold none, so nothing is retried twice. The
   two settings differ, because a locked database frees in milliseconds while a
-  429 clears only on a seconds-scale window, and one shared value spent the
-  whole fetch budget in two seconds. A non-retryable status fails on the first
+  429 clears only on a seconds-scale window, and one shared value exhausted the
+  attempt budget on backoff alone. A non-retryable status fails on the first
   attempt, and a transport error or timeout backs off exponentially with jitter.
-- **A spent URL is terminal, not retried forever.** A fetch that exhausts its
-  attempts records a `NULL` `next_crawl_time`, which the predicate never
-  selects, and the message is dead-lettered.
+- **A failed URL is retried, a finished one is not.** A fetch that exhausts
+  its attempts records `next_crawl_time = now + reschedule_delay`, so the row
+  becomes due again in five minutes instead of spinning on a dead host, and the
+  message is dead-lettered so the queue hands out that URL only once. A URL that
+  *succeeds* with no re-crawl interval configured records a `NULL`
+  `next_crawl_time`, which the predicate never selects, so it is never fetched
+  again.
 - **Indexes the database can actually use.** Staleness is compared against the
   bare column rather than a `strftime(...)` wrapper, and the epoch arithmetic
   happens on the bound parameter, so both composite indexes stay eligible. On
@@ -925,9 +933,8 @@ deactivate                            # leave the virtual environment
 
 <!--
   PLACEHOLDER - to be written.
-  Cover: what is unit-tested vs integration-tested, the shared fakes in
-  tests/support.py, how concurrency is (and is not) tested, and how the
-  parameterised cases are chosen.
+  Cover: what is unit-tested versus integration-tested, how concurrency is (and
+  is not) tested without flakiness, and how the parameterised cases are chosen.
 -->
 
 ## Opportunities
