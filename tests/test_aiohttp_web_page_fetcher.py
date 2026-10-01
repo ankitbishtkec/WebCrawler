@@ -1,12 +1,6 @@
-"""Happy-path and failing-status tests for `AiohttpWebPageFetcher`, the real
-`aiohttp` transport.
-
-The fetcher's only collaborator is the aiohttp session, so the session is a
-`MagicMock` and no socket is ever opened. On the happy path the retry policy is
-a mock that runs the one attempt it is given, and every assertion is on what
-the fetcher asked the session for. Where the attempt count is the point, the
-real `ExponentialBackoffRetryPolicy` drives the fetcher instead, because the
-count belongs to the policy and not to a double.
+"""
+Happy-path and failing-status tests for `AiohttpWebPageFetcher`, the real `aiohttp`
+transport.
 """
 
 from collections.abc import Awaitable, Callable, Sequence
@@ -65,13 +59,7 @@ NO_WAIT: RetrySettings = RetrySettings(
 
 
 class Rig(NamedTuple):
-    """The system under test together with the mocks it was built over.
-
-    Args:
-    fetcher: The real fetcher, wired to the mocks below.
-    session: The mocked session every request is answered by.
-    session_factory: The mocked seam the fetcher builds its session through.
-    """
+    """The system under test together with the mocks it was built over."""
 
     fetcher: AiohttpWebPageFetcher
     session: MagicMock
@@ -79,26 +67,12 @@ class Rig(NamedTuple):
 
 
 async def run_once(operation: Callable[[], Awaitable[str]]) -> str:
-    """Run the operation a single time, which is all a success needs.
-
-    Args:
-    operation: The one attempt the fetcher handed over.
-
-    Returns:
-    str: Whatever that attempt returned.
-    """
+    """Run the operation a single time, which is all a success needs."""
     return await operation()
 
 
 def make_session(body: str = BODY) -> MagicMock:
-    """Build a mocked session that answers every request with a 200.
-
-    Args:
-    body: The body the canned 200 carries.
-
-    Returns:
-    MagicMock: A session whose `get` hands back a response the fetcher can read.
-    """
+    """Build a mocked session that answers every request with a 200."""
     response = MagicMock()
     response.status = SUCCESS_STATUS
     response.text = AsyncMock(return_value=body)
@@ -114,14 +88,7 @@ def make_session(body: str = BODY) -> MagicMock:
 def make_fetcher(
     middlewares: Sequence[RequestMiddleware] = (),
 ) -> Rig:
-    """Build the real fetcher over a mocked session and a mocked retry policy.
-
-    Args:
-    middlewares: The request middlewares applied to every outgoing request.
-
-    Returns:
-    Rig: The fetcher, plus the session and the session factory it holds.
-    """
+    """Build the real fetcher over a mocked session and a mocked retry policy."""
     session = make_session()
     session_factory = AsyncMock(return_value=session)
     # Mocked, but still running the attempt, so the body the session served is
@@ -139,15 +106,7 @@ def make_fetcher(
 
 
 def make_failing_session(status: int) -> MagicMock:
-    """Build a mocked session that answers every request with a non-2xx status.
-
-    Args:
-    status: The failing status the canned answer carries, which decides whether
-        the fetcher treats it as worth another attempt.
-
-    Returns:
-    MagicMock: A session whose response is never read as a body.
-    """
+    """Build a mocked session that answers every request with a non-2xx status."""
     response = MagicMock()
     response.status = status
     response.text = AsyncMock(return_value=BODY)
@@ -161,17 +120,7 @@ def make_failing_session(status: int) -> MagicMock:
 
 
 def make_retrying_fetcher(session: MagicMock) -> Rig:
-    """Build the real fetcher over a mocked session and the real retry policy.
-
-    The attempt count below is owned by the policy, not by a mock, so the real
-    one drives the fetcher here and the session is the only double.
-
-    Args:
-    session: The mocked session every attempt is answered by.
-
-    Returns:
-    Rig: The fetcher, plus the session and the session factory it holds.
-    """
+    """Build the real fetcher over a mocked session and the real retry policy."""
     session_factory = AsyncMock(return_value=session)
 
     fetcher = AiohttpWebPageFetcher(
@@ -183,11 +132,7 @@ def make_retrying_fetcher(session: MagicMock) -> Rig:
 
 
 async def test_a_200_answer_is_returned_as_the_page_body() -> None:
-    """A 200 is decoded and handed back, and the session was asked for the URL.
-
-    Returns:
-    None
-    """
+    """A 200 is decoded and handed back, and the session was asked for the URL."""
     rig = make_fetcher()
 
     assert await rig.fetcher.fetch(PAGE) == BODY
@@ -195,11 +140,7 @@ async def test_a_200_answer_is_returned_as_the_page_body() -> None:
 
 
 async def test_the_middlewares_reach_the_headers_that_were_sent() -> None:
-    """What a middleware adds is what leaves with the request.
-
-    Returns:
-    None
-    """
+    """What a middleware adds is what leaves with the request."""
     rig = make_fetcher(middlewares=[HeadersMiddleware({"X-Custom": "1"})])
 
     await rig.fetcher.fetch(PAGE)
@@ -208,11 +149,7 @@ async def test_the_middlewares_reach_the_headers_that_were_sent() -> None:
 
 
 async def test_one_session_serves_every_fetch() -> None:
-    """The session is built once and pooled, so the factory runs a single time.
-
-    Returns:
-    None
-    """
+    """The session is built once and pooled, so the factory runs a single time."""
     rig = make_fetcher()
 
     await rig.fetcher.fetch(PAGE)
@@ -222,11 +159,7 @@ async def test_one_session_serves_every_fetch() -> None:
 
 
 async def test_close_awaits_the_session_close() -> None:
-    """Releasing the fetcher releases the session it opened.
-
-    Returns:
-    None
-    """
+    """Releasing the fetcher releases the session it opened."""
     rig = make_fetcher()
     await rig.fetcher.fetch(PAGE)
 
@@ -239,14 +172,7 @@ async def test_close_awaits_the_session_close() -> None:
 async def test_a_retryable_status_uses_the_whole_attempt_budget(
     status: int,
 ) -> None:
-    """A transient answer is asked again, and the last one still reaches the caller.
-
-    Args:
-    status: A status the shipped set retries, so the policy owes it a backoff.
-
-    Returns:
-    None
-    """
+    """A transient answer is asked again, and the last one still reaches the caller."""
     rig = make_retrying_fetcher(make_failing_session(status))
 
     with pytest.raises(RetryableStatusError):
@@ -256,11 +182,7 @@ async def test_a_retryable_status_uses_the_whole_attempt_budget(
 
 
 async def test_a_non_retryable_status_spends_a_single_attempt() -> None:
-    """A final answer is not backed off, so the budget is left untouched.
-
-    Returns:
-    None
-    """
+    """A final answer is not backed off, so the budget is left untouched."""
     rig = make_retrying_fetcher(make_failing_session(FINAL_STATUS))
 
     with pytest.raises(NonRetryableError):
@@ -271,14 +193,7 @@ async def test_a_non_retryable_status_spends_a_single_attempt() -> None:
 
 @pytest.mark.parametrize("status", [UNAVAILABLE_STATUS, FINAL_STATUS])
 async def test_a_failing_status_never_reads_the_body(status: int) -> None:
-    """The status decides the outcome, so the body of a failed answer is left unread.
-
-    Args:
-    status: A failing status, retryable or not; neither reaches the body.
-
-    Returns:
-    None
-    """
+    """The status decides the outcome, so the body of a failed answer is left unread."""
     session = make_failing_session(status)
     response = session.get.return_value
     rig = make_retrying_fetcher(session)
@@ -290,11 +205,7 @@ async def test_a_failing_status_never_reads_the_body(status: int) -> None:
 
 
 async def test_a_transport_error_uses_the_whole_attempt_budget() -> None:
-    """A session that cannot even ask is worth the same number of attempts.
-
-    Returns:
-    None
-    """
+    """A session that cannot even ask is worth the same number of attempts."""
     session = make_failing_session(UNAVAILABLE_STATUS)
     session.get.side_effect = TRANSPORT_ERROR
     rig = make_retrying_fetcher(session)
@@ -307,11 +218,7 @@ async def test_a_transport_error_uses_the_whole_attempt_budget() -> None:
 
 
 async def test_a_retryable_status_error_names_the_url_and_the_status() -> None:
-    """The error carries the page asked for and the answer that came back.
-
-    Returns:
-    None
-    """
+    """The error carries the page asked for and the answer that came back."""
     rig = make_retrying_fetcher(make_failing_session(UNAVAILABLE_STATUS))
 
     with pytest.raises(RetryableStatusError) as caught:

@@ -1,13 +1,6 @@
-"""Happy-path and failing-attempt tests for `NoOpPolitenessPolicy` and
+"""
+Happy-path and failing-attempt tests for `NoOpPolitenessPolicy` and
 `ExponentialBackoffRetryPolicy`.
-
-Both units are control flow over the values they are handed, so the only double
-is the operation the retry policy is given. Nothing here measures time: the
-delays the failing tests provoke are zero, so what they count is the attempts
-and never the wait between them, and no clock is faked and no test can be flaky.
-
-Every test is `async def` and runs on the one event loop `pytest-asyncio` gives
-it, so the per-attempt deadline is timed by that loop and never by a fresh one.
 """
 
 from collections.abc import Awaitable, Callable, Sequence
@@ -70,17 +63,7 @@ NO_ATTEMPTS: RetrySettings = RetrySettings(
 def make_failing_operation(
     error: Exception,
 ) -> tuple[Callable[[], Awaitable[str]], MagicMock]:
-    """Build an operation that always fails, plus the counter that records it.
-
-    The operation is a plain function, not one coroutine, because the policy
-    calls it per attempt and a coroutine cannot be awaited twice.
-
-    Args:
-    error: The error every attempt raises, so the last one is the real cause.
-
-    Returns:
-    tuple: The operation to hand over, and a counter with one call per attempt.
-    """
+    """Build an operation that always fails, plus the counter that records it."""
     attempts = MagicMock()
 
     async def attempt() -> str:
@@ -93,14 +76,7 @@ def make_failing_operation(
 def make_recovering_operation(
     values: Sequence[str],
 ) -> tuple[Callable[[], Awaitable[str]], MagicMock]:
-    """Build an operation that fails until its last value is reached.
-
-    Args:
-    values: The value each attempt would return, the first only the last one wins.
-
-    Returns:
-    tuple: The operation to hand over, and a counter with one call per attempt.
-    """
+    """Build an operation that fails until its last value is reached."""
     attempts = MagicMock()
 
     async def attempt() -> str:
@@ -114,20 +90,12 @@ def make_recovering_operation(
 
 
 async def test_before_fetch_reports_no_wait() -> None:
-    """The shipped default never delays a crawl, so the answer is a constant 0.
-
-    Returns:
-    None
-    """
+    """The shipped default never delays a crawl, so the answer is a constant 0."""
     assert await NoOpPolitenessPolicy().before_fetch(PAGE) == 0
 
 
 async def test_record_fetch_accepts_a_result_and_records_nothing() -> None:
-    """A completed attempt is accepted and dropped, since there is nothing to learn.
-
-    Returns:
-    None
-    """
+    """A completed attempt is accepted and dropped, since there is nothing to learn."""
     policy = NoOpPolitenessPolicy()
     result = BaseResult(is_success=True)
 
@@ -135,11 +103,7 @@ async def test_record_fetch_accepts_a_result_and_records_nothing() -> None:
 
 
 async def test_an_operation_that_works_runs_once_and_returns_its_value() -> None:
-    """The value the operation returned is the value the caller gets back.
-
-    Returns:
-    None
-    """
+    """The value the operation returned is the value the caller gets back."""
     operation = AsyncMock(return_value=BODY)
 
     result = await ExponentialBackoffRetryPolicy(FAST).execute(operation)
@@ -150,11 +114,7 @@ async def test_an_operation_that_works_runs_once_and_returns_its_value() -> None
 
 async def test_a_transient_failure_spends_every_attempt_and_reraises_the_last(
 ) -> None:
-    """An ordinary failure is retried, and the caller sees the real cause.
-
-    Returns:
-    None
-    """
+    """An ordinary failure is retried, and the caller sees the real cause."""
     operation, attempts = make_failing_operation(RuntimeError("the site hung up"))
 
     with pytest.raises(RuntimeError) as caught:
@@ -165,11 +125,7 @@ async def test_a_transient_failure_spends_every_attempt_and_reraises_the_last(
 
 
 async def test_a_final_answer_spends_a_single_attempt() -> None:
-    """`NonRetryableError` is the policy's own signal to stop at once.
-
-    Returns:
-    None
-    """
+    """`NonRetryableError` is the policy's own signal to stop at once."""
     error = NonRetryableError(PAGE.get_url(), "the site answered with status 404")
     operation, attempts = make_failing_operation(error)
 
@@ -182,11 +138,7 @@ async def test_a_final_answer_spends_a_single_attempt() -> None:
 
 async def test_an_operation_that_recovers_returns_the_success_it_finished_on(
 ) -> None:
-    """The first success ends the loop, and its value is what the caller gets.
-
-    Returns:
-    None
-    """
+    """The first success ends the loop, and its value is what the caller gets."""
     operation, attempts = make_recovering_operation(["first", "second", "third"])
 
     result = await ExponentialBackoffRetryPolicy(NO_WAIT).execute(operation)
@@ -196,11 +148,7 @@ async def test_an_operation_that_recovers_returns_the_success_it_finished_on(
 
 
 async def test_a_budget_below_one_never_runs_the_operation() -> None:
-    """A budget of zero is refused rather than reported as a success.
-
-    Returns:
-    None
-    """
+    """A budget of zero is refused rather than reported as a success."""
     operation, attempts = make_failing_operation(RuntimeError("never reached"))
 
     with pytest.raises(ValueError):

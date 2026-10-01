@@ -1,9 +1,4 @@
-"""Unit tests for `Orchestrator`, the seed gate and the one owner of the loop.
-
-The store, the poller, and the worker are mocks, and both `run` methods return
-at once, so a test reads the seed step and stops instead of driving a crawl
-that never ends.
-"""
+"""Unit tests for `Orchestrator`, the seed gate and the one owner of the loop."""
 
 from typing import NamedTuple
 from unittest.mock import MagicMock, call
@@ -21,15 +16,7 @@ REJECTED: str = "not a url"
 
 
 class _Built(NamedTuple):
-    """The orchestrator under test, with the mocks it was built with.
-
-    Args:
-    orchestrator: The orchestrator, built over three mocked collaborators.
-    repository: The mocked crawl state store.
-    poller: The mocked poller, whose `run` returns at once.
-    worker: The mocked worker, whose `run` returns at once.
-    seed_calls: A manager recording the seed's two calls, so their order is visible.
-    """
+    """The orchestrator under test, with the mocks it was built with."""
 
     orchestrator: Orchestrator
     repository: MagicMock
@@ -39,14 +26,7 @@ class _Built(NamedTuple):
 
 
 def _build_orchestrator(seed_line: str) -> _Built:
-    """Build the orchestrator over mocks, with both loops stubbed to return at once.
-
-    Args:
-    seed_line: The operator's single seed URL, valid or not.
-
-    Returns:
-    _Built: The orchestrator and the mocks to assert on.
-    """
+    """Build the orchestrator over mocks, with both loops stubbed to return at once."""
     repository = MagicMock(spec=URLStateRepository)
     poller = MagicMock(spec=URLPoller)
     poller.run.return_value = None
@@ -62,11 +42,7 @@ def _build_orchestrator(seed_line: str) -> _Built:
 
 
 async def test_a_valid_seed_is_created_in_the_store() -> None:
-    """The one seed becomes one row, created in a single store call.
-
-    Returns:
-    None
-    """
+    """The one seed becomes one row, created in a single store call."""
     built = _build_orchestrator(SEED)
 
     await built.orchestrator.run()
@@ -75,11 +51,7 @@ async def test_a_valid_seed_is_created_in_the_store() -> None:
 
 
 async def test_a_valid_seed_is_queued_by_the_poller() -> None:
-    """The same seed is then handed to the poller as a one URL list.
-
-    Returns:
-    None
-    """
+    """The same seed is then handed to the poller as a one URL list."""
     built = _build_orchestrator(SEED)
 
     await built.orchestrator.run()
@@ -88,11 +60,7 @@ async def test_a_valid_seed_is_queued_by_the_poller() -> None:
 
 
 async def test_the_seed_is_created_before_it_is_queued() -> None:
-    """The row is written first, since the poller only queues rows that exist.
-
-    Returns:
-    None
-    """
+    """The row is written first, since the poller only queues rows that exist."""
     built = _build_orchestrator(SEED)
 
     await built.orchestrator.run()
@@ -104,11 +72,7 @@ async def test_the_seed_is_created_before_it_is_queued() -> None:
 
 
 async def test_run_starts_the_poller_and_the_worker() -> None:
-    """One poll loop and one worker loop, started together once the seed is in.
-
-    Returns:
-    None
-    """
+    """One poll loop and one worker loop, started together once the seed is in."""
     built = _build_orchestrator(SEED)
 
     await built.orchestrator.run()
@@ -118,11 +82,7 @@ async def test_run_starts_the_poller_and_the_worker() -> None:
 
 
 async def test_a_seed_that_is_not_a_url_creates_and_queues_nothing() -> None:
-    """A rejected seed ends the session, so the store and the queue are untouched.
-
-    Returns:
-    None
-    """
+    """A rejected seed ends the session, so the store and the queue are untouched."""
     built = _build_orchestrator(REJECTED)
 
     await built.orchestrator.run()
@@ -132,11 +92,7 @@ async def test_a_seed_that_is_not_a_url_creates_and_queues_nothing() -> None:
 
 
 async def test_an_empty_seed_creates_and_queues_nothing() -> None:
-    """An empty seed ends the session before the seed is even parsed as a URL.
-
-    Returns:
-    None
-    """
+    """An empty seed ends the session before the seed is even parsed as a URL."""
     built = _build_orchestrator("")
 
     await built.orchestrator.run()
@@ -147,11 +103,7 @@ async def test_an_empty_seed_creates_and_queues_nothing() -> None:
 
 
 async def test_a_seed_the_store_cannot_create_queues_and_crawls_nothing() -> None:
-    """A failed insert ends the session, so the queue and both loops are untouched.
-
-    Returns:
-    None
-    """
+    """A failed insert ends the session, so the queue and both loops are untouched."""
     built = _build_orchestrator(SEED)
     built.repository.create_urls.side_effect = RuntimeError("the insert failed")
 
@@ -163,11 +115,7 @@ async def test_a_seed_the_store_cannot_create_queues_and_crawls_nothing() -> Non
 
 
 async def test_a_seed_the_poller_cannot_queue_is_still_a_durable_row() -> None:
-    """The row outlives the failure, so only the two loops are never started.
-
-    Returns:
-    None
-    """
+    """The row outlives the failure, so only the two loops are never started."""
     built = _build_orchestrator(SEED)
     built.poller.enqueue_urls.side_effect = RuntimeError("the claim failed")
 
@@ -179,11 +127,7 @@ async def test_a_seed_the_poller_cannot_queue_is_still_a_durable_row() -> None:
 
 
 async def test_a_crawl_task_that_fails_returns_instead_of_raising() -> None:
-    """One failed task is logged, so `run` returns after both loops were started.
-
-    Returns:
-    None
-    """
+    """One failed task is logged, so `run` returns after both loops were started."""
     built = _build_orchestrator(SEED)
     built.worker.run.side_effect = RuntimeError("the worker died")
 

@@ -1,10 +1,4 @@
-"""Unit tests for `SQLiteURLStateRepository`, the only crawl state store shipped.
-
-`aiosqlite.connect` is patched, so no database file is ever opened and no
-statement reaches SQLite: the store's whole job is assembling a statement and
-binding it, so every test here asserts that a statement and its values reached
-the connection, and nothing else.
-"""
+"""Unit tests for `SQLiteURLStateRepository`, the only crawl state store shipped."""
 
 from collections.abc import AsyncIterator, Generator, Iterator, Sequence
 from dataclasses import dataclass
@@ -41,87 +35,43 @@ MARK_STARTED_HEAD: str = MARK_STARTED_BATCH_SQL.split("IN (")[0]
 
 
 class _FakeCursor:
-    """The cursor a mocked `execute` hands back, carrying the rows a test chose.
-
-    Args:
-        rows: The rows this cursor reports, each one the `custom_url` column.
-    """
+    """The cursor a mocked `execute` hands back, carrying the rows a test chose."""
 
     def __init__(self, rows: Sequence[Sequence[str]]) -> None:
-        """Copy the rows this cursor will report.
-
-        Args:
-            rows: The rows `fetchall` returns, in the order given.
-        """
+        """Copy the rows this cursor will report."""
         self._rows = list(rows)
 
     async def fetchall(self) -> list[Sequence[str]]:
-        """Return every row this cursor was built with.
-
-        Returns:
-            list[Sequence[str]]: The rows, as a live cursor would drain them.
-        """
+        """Return every row this cursor was built with."""
         return list(self._rows)
 
     async def __aiter__(self) -> AsyncIterator[Sequence[str]]:
-        """Yield the rows one at a time, as a live cursor would.
-
-        Returns:
-            AsyncIterator[Sequence[str]]: An iterator over the same rows.
-        """
+        """Yield the rows one at a time, as a live cursor would."""
         for row in self._rows:
             yield row
 
 
 class _FakeExecuteContext:
-    """The async context manager every mocked statement call returns.
-
-    Args:
-        cursor: The cursor `__aenter__` hands to the repository.
-    """
+    """The async context manager every mocked statement call returns."""
 
     def __init__(self, cursor: _FakeCursor) -> None:
-        """Hold the cursor to hand back on entry.
-
-        Args:
-            cursor: The cursor the `async with` block receives.
-        """
+        """Hold the cursor to hand back on entry."""
         self._cursor = cursor
 
     async def __aenter__(self) -> _FakeCursor:
-        """Enter the block and hand over the cursor.
-
-        Returns:
-            _FakeCursor: The cursor holding the rows a test chose.
-        """
+        """Enter the block and hand over the cursor."""
         return self._cursor
 
     async def __aexit__(self, *error: object) -> None:
-        """Leave the block, as the aiosqlite context manager does.
-
-        Args:
-            error: The exception triple, empty on the happy path.
-
-        Returns:
-            None
-        """
+        """Leave the block, as the aiosqlite context manager does."""
         return None
 
 
 class _FakeConnection:
-    """The aiosqlite connection stand-in the repository drives.
-
-    Args:
-        rows: The rows every cursor this connection hands out reports.
-    """
+    """The aiosqlite connection stand-in the repository drives."""
 
     def __init__(self, rows: Sequence[Sequence[str]] = ()) -> None:
-        """Expose one mock per connection method and record the rows to report.
-
-        Args:
-            rows: The rows every `fetchall` hands back. A test may assign
-                `rows` again before its call to choose what the cursor yields.
-        """
+        """Expose one mock per connection method and record the rows to report."""
         self.rows = list(rows)
         # aiosqlite's `execute` and `executemany` are plain methods returning a
         # context manager, so these two are sync mocks; only `close` is awaited.
@@ -130,30 +80,13 @@ class _FakeConnection:
         self.close = AsyncMock()
 
     def _context(self, *_args: object, **_kwargs: object) -> _FakeExecuteContext:
-        """Return a context manager over the rows this connection was given.
-
-        Args:
-            *_args: The statement and its parameters, recorded by the mock itself.
-            **_kwargs: Nothing is passed by keyword.
-
-        Returns:
-            _FakeExecuteContext: A context manager yielding a cursor over `rows`.
-        """
+        """Return a context manager over the rows this connection was given."""
         return _FakeExecuteContext(_FakeCursor(self.rows))
 
     def __await__(self) -> Generator[Any, None, None]:
-        """Stand in for `await connection`, which starts aiosqlite's thread.
-
-        Returns:
-            Generator[Any, None, None]: An awaitable that is already done, so no
-            worker thread starts and no file is opened.
-        """
+        """Stand in for `await connection`, which starts aiosqlite's thread."""
         async def _ready() -> None:
-            """Finish at once, in place of the connection's worker thread.
-
-            Returns:
-                None
-            """
+            """Finish at once, in place of the connection's worker thread."""
             return None
 
         return _ready().__await__()
@@ -161,27 +94,14 @@ class _FakeConnection:
 
 @dataclass(frozen=True)
 class _Store:
-    """The store under test and the fake connection it drives.
-
-    Args:
-        repository: The store, constructed over `connection`.
-        connection: The fake connection recording every statement and the values
-            bound to it.
-    """
+    """The store under test and the fake connection it drives."""
 
     repository: SQLiteURLStateRepository
     connection: _FakeConnection
 
 
 def urls(count: int) -> set[CustomURL]:
-    """Build the canonical URLs of pages 1 through `count`.
-
-    Args:
-        count: How many pages to name.
-
-    Returns:
-        set[CustomURL]: One URL per page, unordered.
-    """
+    """Build the canonical URLs of pages 1 through `count`."""
     return {
         CustomURL(f"{HOST}/page-{index}.html") for index in range(1, count + 1)
     }
@@ -189,15 +109,7 @@ def urls(count: int) -> set[CustomURL]:
 
 @pytest.fixture
 def store() -> Iterator[_Store]:
-    """Build the store over a fake connection, so nothing is opened.
-
-    `aiosqlite.connect` is patched, so the constructor runs and the path is
-    never touched; the clock double reports `NOW`, and the retry policy double
-    is never consulted on the happy path.
-
-    Yields:
-        _Store: The store under test and the connection it drives.
-    """
+    """Build the store over a fake connection, so nothing is opened."""
     connection = _FakeConnection()
     time_provider = MagicMock()
     time_provider.now.return_value = NOW
@@ -211,14 +123,7 @@ def store() -> Iterator[_Store]:
 
 
 async def test_initialize_creates_the_schema(store: _Store) -> None:
-    """The SQLite version is checked once, then every schema statement is run.
-
-    Args:
-        store: The store under test.
-
-    Returns:
-        None
-    """
+    """The SQLite version is checked once, then every schema statement is run."""
     with patch.object(models, "require_returning_support") as require_support:
         await store.repository.initialize()
 
@@ -232,15 +137,7 @@ async def test_initialize_creates_the_schema(store: _Store) -> None:
 
 @pytest.mark.parametrize("count", [1, 3])
 async def test_create_urls_inserts_the_batch(store: _Store, count: int) -> None:
-    """One insert carries every URL of the set and the injected instant.
-
-    Args:
-        store: The store under test.
-        count: How many URLs the caller's set holds.
-
-    Returns:
-        None
-    """
+    """One insert carries every URL of the set and the injected instant."""
     wanted = urls(count)
 
     await store.repository.create_urls(wanted)
@@ -254,14 +151,7 @@ async def test_create_urls_inserts_the_batch(store: _Store, count: int) -> None:
 async def test_get_crawlable_urls_returns_the_rows_its_cursor_ran(
     store: _Store,
 ) -> None:
-    """The read maps the rows the cursor yielded and binds both timeouts.
-
-    Args:
-        store: The store under test.
-
-    Returns:
-        None
-    """
+    """The read maps the rows the cursor yielded and binds both timeouts."""
     store.connection.rows = [
         (f"{HOST}/page-1.html",),
         (f"{HOST}/page-2.html",),
@@ -281,14 +171,7 @@ async def test_get_crawlable_urls_returns_the_rows_its_cursor_ran(
 
 
 async def test_claim_candidates_returns_the_claimed_rows(store: _Store) -> None:
-    """The claim runs between a BEGIN and a COMMIT, binding the queued state.
-
-    Args:
-        store: The store under test.
-
-    Returns:
-        None
-    """
+    """The claim runs between a BEGIN and a COMMIT, binding the queued state."""
     store.connection.rows = [(f"{HOST}/page-1.html",)]
 
     claimed = await store.repository.claim_candidates(
@@ -308,15 +191,7 @@ async def test_claim_candidates_returns_the_claimed_rows(store: _Store) -> None:
 async def test_mark_started_updates_the_whole_batch(
     store: _Store, count: int
 ) -> None:
-    """One widened update binds the started state, the instant, and every URL.
-
-    Args:
-        store: The store under test.
-        count: How many URLs the caller's set holds.
-
-    Returns:
-        None
-    """
+    """One widened update binds the started state, the instant, and every URL."""
     wanted = urls(count)
 
     await store.repository.mark_started(wanted, NOW)
@@ -334,14 +209,7 @@ async def test_mark_started_updates_the_whole_batch(
 async def test_complete_crawl_writes_the_outcomes_and_the_discoveries(
     store: _Store,
 ) -> None:
-    """The outcome update runs first, then the insert of what the pages revealed.
-
-    Args:
-        store: The store under test.
-
-    Returns:
-        None
-    """
+    """The outcome update runs first, then the insert of what the pages revealed."""
     crawled = CustomURL(f"{HOST}/page-1.html")
     found = CustomURL(f"{HOST}/page-2.html")
 
@@ -360,14 +228,7 @@ async def test_complete_crawl_writes_the_outcomes_and_the_discoveries(
 
 
 async def test_close_awaits_the_connection_close(store: _Store) -> None:
-    """`close` awaits the connection, so the worker thread behind it can end.
-
-    Args:
-        store: The store under test.
-
-    Returns:
-        None
-    """
+    """`close` awaits the connection, so the worker thread behind it can end."""
     await store.repository.close()
 
     store.connection.close.assert_awaited_once_with()

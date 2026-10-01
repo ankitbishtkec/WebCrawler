@@ -1,9 +1,4 @@
-"""Unit tests for `URLPoller`, the producer half of the crawl loop.
-
-The store and the producer are mocks, so each test only asks which claim the
-poller made and which messages it fed. `run` never returns, so the happy path
-is driven through `queue_candidates`, the one public call that polls.
-"""
+"""Unit tests for `URLPoller`, the producer half of the crawl loop."""
 
 from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
@@ -35,26 +30,12 @@ MAX_ITEMS: int = 7
 
 
 def _claimed(count: int) -> set[CustomURL]:
-    """Return the `count` URLs the mocked store hands back from a claim.
-
-    Args:
-    count: How many rows the claim returned.
-
-    Returns:
-    set[CustomURL]: The claimed URLs, the one set the poller and the test both read.
-    """
+    """Return the `count` URLs the mocked store hands back from a claim."""
     return {CustomURL(f"{HOST}/page-{index}.html") for index in range(1, count + 1)}
 
 
 class _Built(NamedTuple):
-    """The poller under test, with the mocked store and producer behind it.
-
-    Args:
-    poller: The poller, built over a mock store and a mock producer.
-    repository: The mocked crawl state store.
-    producer: The mocked queue write side.
-    claimed: The rows the mocked store returns from every claim.
-    """
+    """The poller under test, with the mocked store and producer behind it."""
 
     poller: URLPoller
     repository: MagicMock
@@ -63,14 +44,7 @@ class _Built(NamedTuple):
 
 
 def _build_poller(claimed: set[CustomURL]) -> _Built:
-    """Build the poller over mocks, with `claimed` waiting to be fed.
-
-    Args:
-    claimed: The rows every claim returns, an empty set for a poll that found nothing.
-
-    Returns:
-    _Built: The poller and the two mocks to assert on.
-    """
+    """Build the poller over mocks, with `claimed` waiting to be fed."""
     repository = MagicMock(spec=URLStateRepository)
     repository.claim_candidates.return_value = claimed
     producer = MagicMock(spec=TopicProducer)
@@ -90,14 +64,7 @@ def _build_poller(claimed: set[CustomURL]) -> _Built:
 
 @pytest.mark.parametrize("count", [0, 2])
 async def test_the_claimed_urls_are_fed_as_one_message_each(count: int) -> None:
-    """One bulk call carries one message per claimed URL, under the caller's key.
-
-    Args:
-    count: How many rows the claim returned.
-
-    Returns:
-    None
-    """
+    """One bulk call carries one message per claimed URL, under the caller's key."""
     claimed = _claimed(count)
     built = _build_poller(claimed)
 
@@ -109,11 +76,7 @@ async def test_the_claimed_urls_are_fed_as_one_message_each(count: int) -> None:
 
 
 async def test_every_message_is_routed_by_the_hash_of_its_own_url() -> None:
-    """`partition_key` is `hash(url)`, the value the producer stores verbatim.
-
-    Returns:
-    None
-    """
+    """`partition_key` is `hash(url)`, the value the producer stores verbatim."""
     claimed = _claimed(2)
     built = _build_poller(claimed)
 
@@ -127,11 +90,7 @@ async def test_every_message_is_routed_by_the_hash_of_its_own_url() -> None:
 
 
 async def test_the_claim_is_asked_for_with_the_configured_timeouts_and_limit() -> None:
-    """The store's claim gets the instant, the row limit, and both windows.
-
-    Returns:
-    None
-    """
+    """The store's claim gets the instant, the row limit, and both windows."""
     built = _build_poller(_claimed(1))
 
     await built.poller.queue_candidates(NOW, REQUEST_ID, MAX_ITEMS)
@@ -142,11 +101,7 @@ async def test_the_claim_is_asked_for_with_the_configured_timeouts_and_limit() -
 
 
 async def test_a_failed_claim_feeds_the_queue_nothing() -> None:
-    """A claim that raises ends the poll, so the feed is never reached.
-
-    Returns:
-    None
-    """
+    """A claim that raises ends the poll, so the feed is never reached."""
     built = _build_poller(_claimed(2))
     built.repository.claim_candidates.side_effect = RuntimeError("the claim failed")
 
@@ -156,11 +111,7 @@ async def test_a_failed_claim_feeds_the_queue_nothing() -> None:
 
 
 async def test_a_failed_caller_url_claim_feeds_the_queue_nothing() -> None:
-    """The one guard covers the other claim too, so the caller's URLs are not fed.
-
-    Returns:
-    None
-    """
+    """The one guard covers the other claim too, so the caller's URLs are not fed."""
     built = _build_poller(set())
     built.repository.claim_urls.side_effect = RuntimeError("the claim failed")
 
@@ -170,11 +121,7 @@ async def test_a_failed_caller_url_claim_feeds_the_queue_nothing() -> None:
 
 
 async def test_a_failed_feed_is_raised_to_the_caller() -> None:
-    """The feed is unguarded, so a networked producer's failure ends the poll.
-
-    Returns:
-    None
-    """
+    """The feed is unguarded, so a networked producer's failure ends the poll."""
     built = _build_poller(_claimed(1))
     built.producer.enqueue_many.side_effect = RuntimeError("the send failed")
 
@@ -185,11 +132,7 @@ async def test_a_failed_feed_is_raised_to_the_caller() -> None:
 
 
 async def test_a_rejected_message_does_not_stop_the_claim_being_fed() -> None:
-    """One overflowed message is only reported, so the whole claim is still sent.
-
-    Returns:
-    None
-    """
+    """One overflowed message is only reported, so the whole claim is still sent."""
     built = _build_poller(_claimed(2))
     built.producer.enqueue_many.return_value = [False, True]
 

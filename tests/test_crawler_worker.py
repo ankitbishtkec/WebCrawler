@@ -1,9 +1,4 @@
-"""Unit tests for `CrawlerWorker`, the consumer half of the crawl loop.
-
-Every collaborator is a mock, so each test only asks which call the worker made
-and with what. `run` never returns, so the happy path is driven through the one
-batch method `run` itself calls.
-"""
+"""Unit tests for `CrawlerWorker`, the consumer half of the crawl loop."""
 
 from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
@@ -39,21 +34,7 @@ DEFER_MS: int = 500
 
 
 class _Built(NamedTuple):
-    """The worker under test, with the batch it is given and its mocked ports.
-
-    Args:
-    worker: The worker, built over a mock on every constructor argument.
-    batch: The messages the test hands to the batch method.
-    urls: The batch's URLs, in the order the batch names them.
-    links: The links the mocked extractor finds on every page of the batch.
-    repository: The mocked crawl state store.
-    reader: The mocked queue read side.
-    fetcher: The mocked page fetcher.
-    extractor: The mocked link extractor.
-    queuer: The mocked queuer the discovered URLs are handed to.
-    politeness: The mocked policy, whose wait is 0 so every URL is fetched.
-    producer: The mocked producer, which parks the messages that failed.
-    """
+    """The worker under test, with the batch it is given and its mocked ports."""
 
     worker: CrawlerWorker
     batch: list[BaseMessage]
@@ -69,14 +50,7 @@ class _Built(NamedTuple):
 
 
 def _build_worker(count: int) -> _Built:
-    """Build the worker over mocks, plus the batch of `count` messages it crawls.
-
-    Args:
-    count: How many messages the batch holds.
-
-    Returns:
-    _Built: The worker, the batch to hand it, and the mocks to assert on.
-    """
+    """Build the worker over mocks, plus the batch of `count` messages it crawls."""
     urls = [CustomURL(f"{HOST}/page-{index}.html") for index in range(1, count + 1)]
     batch = [BaseMessage(url, partition_key=hash(url)) for url in urls]
     links = {CustomURL(f"{HOST}/found-{index}.html") for index in range(1, count + 1)}
@@ -115,14 +89,7 @@ def _build_worker(count: int) -> _Built:
 async def test_each_message_is_marked_started_at_the_clocks_instant(
     count: int,
 ) -> None:
-    """One store call marks every URL of the batch, at the instant the clock gave.
-
-    Args:
-    count: How many messages the batch holds.
-
-    Returns:
-    None
-    """
+    """One store call marks every URL of the batch, at the instant the clock gave."""
     built = _build_worker(count)
 
     await built.worker._process_batch(built.batch)
@@ -131,11 +98,7 @@ async def test_each_message_is_marked_started_at_the_clocks_instant(
 
 
 async def test_the_body_the_fetcher_returned_is_the_body_the_extractor_reads() -> None:
-    """The one message is fetched, and the body that came back is what gets parsed.
-
-    Returns:
-    None
-    """
+    """The one message is fetched, and the body that came back is what gets parsed."""
     built = _build_worker(1)
     url = built.urls[0]
 
@@ -149,14 +112,7 @@ async def test_the_body_the_fetcher_returned_is_the_body_the_extractor_reads() -
 async def test_the_finished_urls_and_the_discovered_links_are_recorded_together(
     count: int,
 ) -> None:
-    """One store call records every outcome beside the links they revealed.
-
-    Args:
-    count: How many messages the batch holds.
-
-    Returns:
-    None
-    """
+    """One store call records every outcome beside the links they revealed."""
     built = _build_worker(count)
 
     await built.worker._process_batch(built.batch)
@@ -170,14 +126,7 @@ async def test_the_finished_urls_and_the_discovered_links_are_recorded_together(
 async def test_the_discovered_links_are_handed_to_the_queuer_as_a_list(
     count: int,
 ) -> None:
-    """The queuer is asked once for exactly the links the batch found, in a list.
-
-    Args:
-    count: How many messages the batch holds.
-
-    Returns:
-    None
-    """
+    """The queuer is asked once for exactly the links the batch found, in a list."""
     built = _build_worker(count)
 
     await built.worker._process_batch(built.batch)
@@ -193,14 +142,7 @@ async def test_the_discovered_links_are_handed_to_the_queuer_as_a_list(
 
 @pytest.mark.parametrize("count", [1, 3])
 async def test_the_batch_is_committed_once_it_is_finished(count: int) -> None:
-    """The reader is handed the very messages of the batch, so the queue moves on.
-
-    Args:
-    count: How many messages the batch holds.
-
-    Returns:
-    None
-    """
+    """The reader is handed the very messages of the batch, so the queue moves on."""
     built = _build_worker(count)
 
     await built.worker._process_batch(built.batch)
@@ -212,14 +154,7 @@ async def test_the_batch_is_committed_once_it_is_finished(count: int) -> None:
 async def test_one_url_whose_fetch_fails_does_not_stop_the_rest_of_the_batch(
     count: int,
 ) -> None:
-    """The failure is one URL: it is rescheduled and parked, the others are done.
-
-    Args:
-    count: How many messages the batch holds, only the first of which fails.
-
-    Returns:
-    None
-    """
+    """The failure is one URL: it is rescheduled and parked, the others are done."""
     built = _build_worker(count)
     failing = built.urls[0]
 
@@ -245,11 +180,7 @@ async def test_one_url_whose_fetch_fails_does_not_stop_the_rest_of_the_batch(
 
 
 async def test_a_complete_crawl_failure_still_commits_the_batch() -> None:
-    """An unrecorded outcome parks the batch and commits it, queueing no links.
-
-    Returns:
-    None
-    """
+    """An unrecorded outcome parks the batch and commits it, queueing no links."""
     built = _build_worker(3)
     built.repository.complete_crawl.side_effect = RuntimeError("the write failed")
 
@@ -263,11 +194,7 @@ async def test_a_complete_crawl_failure_still_commits_the_batch() -> None:
 
 
 async def test_a_park_failure_does_not_stop_the_next_message_being_parked() -> None:
-    """Parking is best effort, so the first failure is logged and the loop goes on.
-
-    Returns:
-    None
-    """
+    """Parking is best effort, so the first failure is logged and the loop goes on."""
     built = _build_worker(2)
     built.fetcher.fetch.side_effect = RuntimeError("the host closed the connection")
     built.producer.enqueue_to_deadletter.side_effect = [
@@ -285,11 +212,7 @@ async def test_a_park_failure_does_not_stop_the_next_message_being_parked() -> N
 
 
 async def test_a_mark_started_failure_still_crawls_and_commits_the_batch() -> None:
-    """The batch is crawled anyway, since the mark is only the store's own record.
-
-    Returns:
-    None
-    """
+    """The batch is crawled anyway, since the mark is only the store's own record."""
     built = _build_worker(1)
     built.repository.mark_started.side_effect = RuntimeError("the update failed")
 
@@ -302,11 +225,7 @@ async def test_a_mark_started_failure_still_crawls_and_commits_the_batch() -> No
 
 
 async def test_a_deferred_url_is_not_fetched_and_is_due_after_its_wait() -> None:
-    """A positive wait defers the URL, so its outcome is the wake up and no body.
-
-    Returns:
-    None
-    """
+    """A positive wait defers the URL, so its outcome is the wake up and no body."""
     built = _build_worker(1)
     built.politeness.before_fetch.return_value = DEFER_MS
 

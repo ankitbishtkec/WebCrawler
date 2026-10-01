@@ -1,10 +1,4 @@
-"""Unit tests for `CrawlerWorkerV1`, the non-blocking consumer.
-
-Every collaborator is a mock, so each test only asks which call the worker made
-and with what. `run` never returns and its crawls are detached, so the happy
-path is driven through the two internal methods `run` itself calls: `_crawl_one`
-per message and `_flush` per window.
-"""
+"""Unit tests for `CrawlerWorkerV1`, the non-blocking consumer."""
 
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -44,21 +38,7 @@ RE_CRAWL: timedelta = timedelta(minutes=30)
 
 
 class _Built(NamedTuple):
-    """The worker under test, with the batch it is given and its mocked ports.
-
-    Args:
-    worker: The worker, built over a mock on every constructor argument.
-    batch: The messages the test hands to the consume loop.
-    urls: The batch's URLs, in the order the batch names them.
-    links: The links the mocked extractor finds on every page of the batch.
-    repository: The mocked crawl state store.
-    reader: The mocked queue read side.
-    fetcher: The mocked page fetcher.
-    extractor: The mocked link extractor.
-    queuer: The mocked queuer the discovered URLs are handed to.
-    politeness: The mocked policy, whose wait is 0 so every URL is fetched.
-    producer: The mocked producer, which parks the messages that failed.
-    """
+    """The worker under test, with the batch it is given and its mocked ports."""
 
     worker: CrawlerWorkerV1
     batch: list[BaseMessage]
@@ -79,16 +59,7 @@ def _build_worker(
     max_concurrent_fetches: int = 500,
     re_crawl_interval: timedelta | None = None,
 ) -> _Built:
-    """Build the worker over mocks, plus the batch of `count` messages it crawls.
-
-    Args:
-    count: How many messages the batch holds.
-    max_concurrent_fetches: The semaphore the worker bounds its fetches with.
-    re_crawl_interval: The interval a finished URL is rescheduled by, or None.
-
-    Returns:
-    _Built: The worker, the batch to hand it, and the mocks to assert on.
-    """
+    """Build the worker over mocks, plus the batch of `count` messages it crawls."""
     urls = [CustomURL(f"{HOST}/page-{index}.html") for index in range(1, count + 1)]
     batch = [BaseMessage(url, partition_key=hash(url)) for url in urls]
     links = {CustomURL(f"{HOST}/found-{index}.html") for index in range(1, count + 1)}
@@ -126,28 +97,14 @@ def _build_worker(
 
 
 async def _crawl_all(built: _Built) -> None:
-    """Crawl every message of the batch, as the consume loop's tasks would.
-
-    Args:
-    built: The worker and its batch.
-
-    Returns:
-    None
-    """
+    """Crawl every message of the batch, as the consume loop's tasks would."""
     await asyncio.gather(
         *(built.worker._crawl_one(message) for message in built.batch)
     )
 
 
 async def _drain(built: _Built) -> None:
-    """Wait for the crawls the worker detached, so no task outlives the test.
-
-    Args:
-    built: The worker whose detached crawls are in flight.
-
-    Returns:
-    None
-    """
+    """Wait for the crawls the worker detached, so no task outlives the test."""
     await asyncio.gather(*tuple(built.worker._crawling), return_exceptions=True)
 
 
@@ -155,14 +112,7 @@ async def _drain(built: _Built) -> None:
 async def test_the_urls_of_the_window_are_marked_started_in_one_store_call(
     count: int,
 ) -> None:
-    """One call marks every crawled URL, at the one instant the flush took.
-
-    Args:
-    count: How many messages the batch holds.
-
-    Returns:
-    None
-    """
+    """One call marks every crawled URL, at the one instant the flush took."""
     built = _build_worker(count)
 
     await _crawl_all(built)
@@ -173,11 +123,7 @@ async def test_the_urls_of_the_window_are_marked_started_in_one_store_call(
 
 
 async def test_the_body_the_fetcher_returned_is_the_body_the_extractor_reads() -> None:
-    """The one message is fetched, and the body that came back is what gets parsed.
-
-    Returns:
-    None
-    """
+    """The one message is fetched, and the body that came back is what gets parsed."""
     built = _build_worker(1)
     url = built.urls[0]
 
@@ -191,14 +137,7 @@ async def test_the_body_the_fetcher_returned_is_the_body_the_extractor_reads() -
 async def test_the_finished_urls_and_the_discovered_links_are_written_together(
     count: int,
 ) -> None:
-    """One call per window records every outcome beside the links they revealed.
-
-    Args:
-    count: How many messages the batch holds.
-
-    Returns:
-    None
-    """
+    """One call per window records every outcome beside the links they revealed."""
     built = _build_worker(count)
 
     await _crawl_all(built)
@@ -210,11 +149,7 @@ async def test_the_finished_urls_and_the_discovered_links_are_written_together(
 
 
 async def test_a_re_crawl_interval_puts_that_interval_on_a_finished_row() -> None:
-    """A configured interval is the outcome a finished URL is stored with.
-
-    Returns:
-    None
-    """
+    """A configured interval is the outcome a finished URL is stored with."""
     built = _build_worker(1, re_crawl_interval=RE_CRAWL)
 
     await _crawl_all(built)
@@ -229,14 +164,7 @@ async def test_a_re_crawl_interval_puts_that_interval_on_a_finished_row() -> Non
 async def test_the_discovered_links_are_handed_to_the_queuer_as_a_list(
     count: int,
 ) -> None:
-    """The queuer is asked once for exactly the links the window found, in a list.
-
-    Args:
-    count: How many messages the batch holds.
-
-    Returns:
-    None
-    """
+    """The queuer is asked once for exactly the links the window found, in a list."""
     built = _build_worker(count)
 
     await _crawl_all(built)
@@ -252,11 +180,7 @@ async def test_the_discovered_links_are_handed_to_the_queuer_as_a_list(
 
 
 async def test_the_queue_is_fed_only_after_the_write_that_stored_the_rows() -> None:
-    """`enqueue_urls` claims rows, so it cannot run before they are committed.
-
-    Returns:
-    None
-    """
+    """`enqueue_urls` claims rows, so it cannot run before they are committed."""
     built = _build_worker(1)
     order: list[str] = []
     built.repository.complete_crawl.side_effect = lambda *args: order.append("write")
@@ -269,11 +193,7 @@ async def test_the_queue_is_fed_only_after_the_write_that_stored_the_rows() -> N
 
 
 async def test_the_window_is_written_once_and_the_buffer_starts_empty_again() -> None:
-    """A flush takes the buffer whole, so the next window is not written twice.
-
-    Returns:
-    None
-    """
+    """A flush takes the buffer whole, so the next window is not written twice."""
     built = _build_worker(1)
 
     await _crawl_all(built)
@@ -287,11 +207,7 @@ async def test_the_window_is_written_once_and_the_buffer_starts_empty_again() ->
 
 
 async def test_the_batch_is_committed_while_its_crawls_are_still_running() -> None:
-    """The queue moves on without waiting, which is the whole point of this worker.
-
-    Returns:
-    None
-    """
+    """The queue moves on without waiting, which is the whole point of this worker."""
     built = _build_worker(2)
     release = asyncio.Event()
     events: list[str] = []
@@ -320,11 +236,7 @@ async def test_the_batch_is_committed_while_its_crawls_are_still_running() -> No
 
 
 async def test_a_url_whose_fetch_fails_does_not_stop_the_others() -> None:
-    """The failure is one URL: it is rescheduled and parked, the others are done.
-
-    Returns:
-    None
-    """
+    """The failure is one URL: it is rescheduled and parked, the others are done."""
     built = _build_worker(2)
     failing = built.urls[0]
 
@@ -347,11 +259,7 @@ async def test_a_url_whose_fetch_fails_does_not_stop_the_others() -> None:
 
 
 async def test_a_deferred_url_is_not_fetched_and_is_due_after_its_wait() -> None:
-    """A positive wait defers the URL, so its outcome is the wake up and no body.
-
-    Returns:
-    None
-    """
+    """A positive wait defers the URL, so its outcome is the wake up and no body."""
     built = _build_worker(1)
     built.politeness.before_fetch.return_value = DEFER_MS
 
@@ -367,11 +275,7 @@ async def test_a_deferred_url_is_not_fetched_and_is_due_after_its_wait() -> None
 
 
 async def test_a_park_failure_does_not_stop_the_next_message_being_parked() -> None:
-    """Parking is best effort, so the first failure is logged and the next goes on.
-
-    Returns:
-    None
-    """
+    """Parking is best effort, so the first failure is logged and the next goes on."""
     built = _build_worker(2)
     built.fetcher.fetch.side_effect = RuntimeError("the host closed the connection")
     built.producer.enqueue_to_deadletter.side_effect = [
@@ -388,11 +292,7 @@ async def test_a_park_failure_does_not_stop_the_next_message_being_parked() -> N
 
 
 async def test_a_full_deadletter_queue_is_reported_and_the_crawl_still_finishes() -> None:
-    """A refused park is logged, and the URL is still rescheduled and recorded.
-
-    Returns:
-    None
-    """
+    """A refused park is logged, and the URL is still rescheduled and recorded."""
     built = _build_worker(1)
     built.fetcher.fetch.side_effect = RuntimeError("the host closed the connection")
     built.producer.enqueue_to_deadletter.return_value = False
@@ -406,11 +306,7 @@ async def test_a_full_deadletter_queue_is_reported_and_the_crawl_still_finishes(
 
 
 async def test_a_failed_write_queues_nothing_and_leaves_the_rows_to_the_timeout() -> None:
-    """The rows of an unwritten window stay `started_crawl`, and nothing is claimed.
-
-    Returns:
-    None
-    """
+    """The rows of an unwritten window stay `started_crawl`, and nothing is claimed."""
     built = _build_worker(1)
     built.repository.complete_crawl.side_effect = RuntimeError("the write failed")
 
@@ -421,11 +317,7 @@ async def test_a_failed_write_queues_nothing_and_leaves_the_rows_to_the_timeout(
 
 
 async def test_a_failed_mark_started_still_writes_the_window() -> None:
-    """The mark is only the store's own record, so the outcomes are still written.
-
-    Returns:
-    None
-    """
+    """The mark is only the store's own record, so the outcomes are still written."""
     built = _build_worker(1)
     built.repository.mark_started.side_effect = RuntimeError("the update failed")
 
@@ -438,11 +330,7 @@ async def test_a_failed_mark_started_still_writes_the_window() -> None:
 
 
 async def test_a_url_crawled_twice_in_one_window_is_written_once() -> None:
-    """The buffers key by URL, so one row is marked once and finished once.
-
-    Returns:
-    None
-    """
+    """The buffers key by URL, so one row is marked once and finished once."""
     built = _build_worker(1, re_crawl_interval=RE_CRAWL)
     message = built.batch[0]
     built.worker._time_provider = MagicMock(spec=TimeProviderFactory)
@@ -469,11 +357,7 @@ async def test_a_url_crawled_twice_in_one_window_is_written_once() -> None:
 
 
 async def test_close_writes_what_the_crawls_left_and_releases_the_session() -> None:
-    """The last window is the caller's to trigger, so `close` flushes and closes.
-
-    Returns:
-    None
-    """
+    """The last window is the caller's to trigger, so `close` flushes and closes."""
     built = _build_worker(1)
 
     await _crawl_all(built)
@@ -486,11 +370,7 @@ async def test_close_writes_what_the_crawls_left_and_releases_the_session() -> N
 
 
 async def test_the_second_fetch_waits_for_the_first_when_one_slot_is_configured() -> None:
-    """The semaphore counts requests in flight, so one slot means one at a time.
-
-    Returns:
-    None
-    """
+    """The semaphore counts requests in flight, so one slot means one at a time."""
     built = _build_worker(2, max_concurrent_fetches=1)
     in_flight = 0
     most_in_flight = 0

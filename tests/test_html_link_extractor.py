@@ -1,9 +1,4 @@
-"""Happy-path tests for `HtmlLinkExtractor`, the exact-hostname scope rule.
-
-The extractor is a pure function on a string, so nothing is mocked. Its one
-decision is scope: a link survives only when its hostname equals the page's
-own, and the returned set of canonical texts is the whole answer.
-"""
+"""Happy-path tests for `HtmlLinkExtractor`, the exact-hostname scope rule."""
 
 import pytest
 
@@ -18,14 +13,7 @@ PAGE: str = f"{HOST}/dir/page.html"
 
 
 def texts(links: set[CustomURL]) -> set[str]:
-    """Return the canonical text of each link, so a test compares an unordered set.
-
-    Args:
-    links: The set `extract` returned.
-
-    Returns:
-    set[str]: One canonical URL text per link, so no test can depend on an order.
-    """
+    """Return the canonical text of each link, so a test compares an unordered set."""
     return {link.get_url() for link in links}
 
 
@@ -43,26 +31,14 @@ def texts(links: set[CustomURL]) -> set[str]:
     ],
 )
 def test_same_host_links_are_returned(html: str, expected: set[str]) -> None:
-    """A page yields exactly its own-host links, one entry per real page.
-
-    Args:
-    html: The page body, holding one anchor per link.
-    expected: The canonical texts `extract` must return, in any order.
-
-    Returns:
-    None
-    """
+    """A page yields exactly its own-host links, one entry per real page."""
     links = HtmlLinkExtractor().extract(html, CustomURL(PAGE))
 
     assert texts(links) == expected
 
 
 def test_an_off_host_link_is_dropped() -> None:
-    """A link to somebody else's site is out of scope, and a same-host one stays.
-
-    Returns:
-    None
-    """
+    """A link to somebody else's site is out of scope, and a same-host one stays."""
     html = (
         '<a href="https://example.com/elsewhere.html">other</a>'
         '<a href="/kept.html">kept</a>'
@@ -74,11 +50,7 @@ def test_an_off_host_link_is_dropped() -> None:
 
 
 def test_a_relative_href_resolves_against_the_page_url() -> None:
-    """A relative href resolves as a browser reading this page's own URL would.
-
-    Returns:
-    None
-    """
+    """A relative href resolves as a browser reading this page's own URL would."""
     html = '<a href="sibling.html">sibling</a>'
 
     links = HtmlLinkExtractor().extract(html, CustomURL(PAGE))
