@@ -32,31 +32,36 @@ The brief, taken from its opening paragraph, asks for exactly three things.
 
 ## Non-Functional Requirements
 
-The qualities the crawler is judged on, with where each one actually stands. The
-status column is deliberate: a requirement list that claims everything is met is
-worthless as a design document.
+Taken from the brief's own coding requirements, one row each, with where it
+actually stands. Anything the brief did not ask for is not here: the qualities
+it did not ask for are its functional requirements, its design section, or the
+schema below.
 
 | # | Requirement | Status |
 |---|---|---|
-| NFR1 | **Concurrent.** Many pages are fetched at once, not one after another. | Met. `CrawlerWorker` fetches all 50 messages of a batch in one `asyncio.TaskGroup`; `CrawlerWorkerV1` detaches a crawl per message and holds up to 1000 fetches in flight. Both on a single event loop. |
-| NFR2 | **Fetch fairly, without saturating the host.** Do not hammer a site. | **Not met.** The shipped `NoOpPolitenessPolicy` answers `0` for every URL, so nothing throttles. The interface and the deferral path exist, so a delaying policy drops in without touching the worker, but no such policy is written. See Opportunities. |
-| NFR3 | **Not overly saturate the crawled website.** | Partial. Retries back off exponentially with jitter, and a failed URL waits 5 minutes before it is due again, so a rate-limited host is not retried in a tight loop. `CrawlerWorkerV1`'s cap is 1000 fetches in flight and it is **process-wide, not per host**, so on a single-host crawl all 1000 can land on one site: against a local test server that served 150ms pages, 65 of 4000 URLs exhausted the 12s fetch timeout at that setting. There is no `robots.txt` check. |
-| NFR4 | **Modular.** Each concern in its own module, not one service per module. | Met. Modules in separate folders, all on one event loop. |
-| NFR5 | **Scalable to higher traffic.** | Met by substitution, not by size. The store, queue, and fetcher sit behind interfaces, so the process scales by swapping them; the shipped crawler is single-process and runs one worker, whichever of the two is chosen. |
-| NFR6 | **Composition over inheritance.** | Met. Collaborators are constructor arguments. The classes that extend a port are the store and the two workers, and nothing extends them in turn. |
-| NFR7 | **Coding best practices.** SOLID, with each boundary behind an interface shipping one simple default. | Met. Eleven interfaces in `ports/`, each with one shipped implementation, except `CrawlWorker`, which ships two. |
-| NFR8 | **I/O best practices.** Every I/O call owned by the implementation that makes it. | Met. Retry and timeout live in the store and the fetcher, never in their callers, so nothing is retried twice. No I/O call blocks the event loop. |
-| NFR9 | **Fast.** | Met. The selection query is served by its indexes; the claim is a single `UPDATE ... RETURNING` per chunk rather than a select followed by an update. |
-| NFR10 | **Testable, with high code coverage.** | Partial. 97 unit tests, every collaborator mocked, so the suite is fast and needs no network. Coverage is **not** measured: no coverage tool is configured, so the number is unverified rather than high. |
-| NFR11 | No crawling framework; the crawl loop, scheduler, and queue are our own. | Met. |
-| NFR12 | Async APIs wherever the operation is I/O. | Met. Everything under `ports/` is `async` except the three pure-CPU boundaries: link extraction, the clock, and request middleware. |
-| NFR13 | Complete signatures: arguments, return, and the exceptions a caller must handle, documented per function. | Met. |
-| NFR14 | Comments only for non-obvious design decisions, concurrency invariants, race avoidance, and trade-offs. | Met. |
-| NFR15 | Parameterised unit tests. | Met. |
-| NFR16 | All timestamps stored are UTC; a new row gets `next_crawl_time = created_time`. | Met. |
-| NFR17 | Index the primary key, and the state plus both time columns for the selection predicate. | Met. |
-| NFR18 | SQLite >= 3.35, because the claim query is `UPDATE ... RETURNING`. | Met, asserted at startup. |
-| NFR19 | No re-crawl of a finished URL unless a re-crawl interval is configured. | Met. |
+| NFR1 | **Own implementation, no crawling framework.** `scrapy` and `go-colly` are out; a library for HTML parsing is welcome. | Met. No crawling framework is used. `utils/html_parser.py` wraps the standard library's `HTMLParser`, and the crawl loop, the scheduler and the queue are all in `application/` and `infrastructure/`. |
+| NFR2 | **Written as production code.** The brief asks about structure, trade-offs, observable behaviour and concurrency, not presentation. | Met. The design decisions and what each cost are recorded under Design Decisions, the observable behaviour under Functional Requirements, and the only interface is a prompt and the log. |
+| NFR3 | **Use concurrency.** | Met. `CrawlerWorker` fetches a whole batch in one `asyncio.TaskGroup`; `CrawlerWorkerV1` detaches a crawl per message and holds up to 1000 fetches in flight, which measured 18381 pages against 4856 in 35s on a fast site. Both on the one event loop. |
+| NFR4 | **Unit tests, parameterized, with good coverage.** | Partial. 97 unit tests, 40 of them parameterized cases, every collaborator mocked, so the suite runs in a second with no network. Coverage is not measured: no coverage tool is configured, so the number is unverified rather than high. |
+| NFR5 | **Composition over inheritance, and SOLID.** | Met. Every collaborator is a constructor argument passed in from `main.py`. The only classes that extend a port are the store and the two workers, and nothing extends those in turn. |
+| NFR6 | **The database, the queue and every major class sit behind an interface, with a simple default implementation.** | Met. Eleven interfaces in `ports/`; the defaults are a SQLite store and a `collections.deque` queue, both written here. `CrawlWorker` ships two implementations, so the port is a choice rather than a formality. |
+| NFR7 | **Modules in separate folders, one asyncio event loop for all, and an orchestrator module that runs them.** | Met. `domain/`, `ports/`, `application/`, `infrastructure/`, `utils/`; `Orchestrator` is the only place a task is created or stopped. |
+| NFR8 | **Async APIs wherever possible.** | Met. Everything under `ports/` is `async` except the three pure-CPU boundaries: link extraction, the clock and request middleware. |
+| NFR9 | **A module making I/O calls owns its retry: exponential backoff with jitter, and a timeout.** | Met. The store and the fetcher each hold a `RetryPolicy`; the poller and both workers hold none, so nothing is retried twice, and the two retry settings differ because a locked database frees in milliseconds while a 429 clears on a seconds window. |
+| NFR10 | **Complete signatures: every function documents its arguments, its return and the exceptions a caller must handle.** | Met. On every port method, every constructor and every method that can raise. |
+| NFR11 | **Concise comments before the non-obvious: eureka logic, design decisions, race-condition avoidance, trade-offs. Nothing obvious is commented.** | Met. The comments are the reasoning, not the syntax: why a claim needs no lock, why a politeness wait defers instead of sleeping, why a batch is committed before its fetches finish. |
+| NFR12 | **Production-level design without a service per module; scale by substitution.** | Met by substitution. The store, the queue and the fetcher sit behind interfaces, so the process scales by swapping them, not by adding services. It does not scale by size: one process, one worker instance, one event loop. |
+| NFR13 | **A politeness policy decides when a URL may be fetched, with a no-op default, as the design section specifies.** | Met. `NoOpPolitenessPolicy` reports 0 ms for every URL, which is what the brief asks for, so nothing throttles today; a delaying policy drops in without touching the worker, and a positive wait reschedules that one URL instead of stalling anything. |
+
+Five things that were in this table before are not qualities of the system, and
+have moved to where they belong: the UTC timestamps and
+`next_crawl_time = created_time` on insert, the primary-key and composite
+indexes, and the `SQLite >= 3.35` floor for `UPDATE ... RETURNING` are the
+**Database schema** below; a finished URL never being re-claimed without a
+configured interval is a **behaviour** in Key Features. Two rows were dropped
+as invented rather than invalid: *"not overly saturate the crawled website"*
+and *"fast"* are real concerns, but the brief asks for neither, and neither is
+something the crawl can claim without qualification.
 
 ## High Level Design
 
@@ -706,7 +711,7 @@ The choices that are not obvious from the code, each with what it cost.
 | `complete_crawl` before `enqueue_urls` before `commit` | Each step only after the one before it is durable. `enqueue_urls` claims the rows the insert created, and `commit` acknowledges work that is only finished once recorded. | None. The other orderings all double-fetch or lose work. |
 | A queue timeout stands in for a CDC pipeline | If a row reaches `queued` and the process dies before the message is sent, no change-data-capture stream exists to reconcile the two. A `queued` row older than `queue_timeout` is simply re-selected. | A lost message waits out the timeout. Set to 60 minutes, because at 30s a real backlog was being re-fetched while it still waited. |
 | Two retry settings, not one | A locked database frees in milliseconds; a 429 clears only on a seconds-scale window. One value fitted neither: it spent the whole fetch budget in 1.5s of backoff. | Two constants to keep coherent, and the fetch budget must stay under `JOB_TIMEOUT` or a still-retrying URL is claimed twice. |
-| A politeness wait defers, it never sleeps | One slow URL must not stall a batch, so the URL is rescheduled as `now + wait_ms` and the batch moves on. | A delaying policy is therefore not a throttle, it is a scheduler hint. Real pacing would need the cap in NFR2. |
+| A politeness wait defers, it never sleeps | One slow URL must not stall a batch, so the URL is rescheduled as `now + wait_ms` and the batch moves on. | A delaying policy is therefore not a throttle, it is a scheduler hint. Real pacing would need a per-host cap, which the brief does not ask for. |
 | Two workers behind one `CrawlWorker` port, picked at the prompt | They lose in opposite directions. The batch worker is ahead when every page answers in milliseconds; the non-blocking one is far ahead when one page stalls, since the batch worker leaves its whole batch waiting. Which case a run hits is not knowable before the run. | The operator chooses per run, and the two have to be kept at behavioural parity, since the port declares them the same worker. |
 | Bulk writes on a timer, not on a batch boundary | Waiting for a batch delays every write by its slowest fetch, and the non-blocking worker has no batch to wait for. | A write lands up to `flush_interval_seconds` late, and a crash inside that window leaves those rows for `job_timeout` to reclaim. The period is 10ms, which is past the knee: on a chain-shaped site 0.5s managed 20 pages in 20s where 10ms managed 335, but going from 50ms to 10ms bought only 1.4x more, because the per-page fetch and store cost starts to dominate the window. |
 | Dedupe with sets and dicts, keyed by canonical URL | Two spellings of one page are the same string, so a duplicate is impossible by construction rather than something to check for. `times_crawled` can then be trusted as a re-crawl detector. | A URL that is both finished and discovered in one batch is written once, so the finish update has to win over the insert. |
@@ -716,7 +721,7 @@ The choices that are not obvious from the code, each with what it cost.
 | Retry owned by the I/O implementation | The store and the fetcher each hold a policy; the poller and the worker hold none, so nothing is retried twice. A `commit` is never retried either, being head-based, so a second attempt would remove more than the batch owns. | A caller cannot add its own retry without risking a double. |
 | The in-memory queue has no lock | CPU-bound on a single event loop, and the shipped path has exactly one reader. | A second reader would need one. The `peek`/`commit` contract is already count-based, so it would not change the callers. |
 | Tests mock every collaborator | A unit test that builds a real store and a real queue tests the implementation twice and breaks whenever it is refactored. | The store's own SQL is asserted through a mocked `aiosqlite` connection rather than a real database, so it is checked as calls and parameters, not as stored state. |
-| 97 tests, happy path and the failure that matters | A test earns its place by naming a decision. The failing paths kept are the ones that change what happens next: a fetch that fails without stopping its batch, a `complete_crawl` that fails without enqueueing, a claim that exhausts its budget. Both workers are covered, so the port that stands between them has both sides of the contract tested. | No coverage measurement is configured, so the number is unverified. NFR10. |
+| 97 tests, happy path and the failure that matters | A test earns its place by naming a decision. The failing paths kept are the ones that change what happens next: a fetch that fails without stopping its batch, a `complete_crawl` that fails without enqueueing, a claim that exhausts its budget. Both workers are covered, so the port that stands between them has both sides of the contract tested. | No coverage measurement is configured, so the number is unverified. NFR4. |
 
 ## How To Run It
 
