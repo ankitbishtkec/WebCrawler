@@ -660,33 +660,23 @@ For manual E2E test, refer the [How To Run It](#how-to-run-it) section above.
 
 ## Key Features
 
-What the crawler does, and what each behaviour enables you to build on.
+What each part of the crawler is, and what it buys you. What each one costs you
+is a separate question, answered honestly in
+[`docs/extensions.md`](docs/extensions.md).
 
-| Feature | What it is | What it enables |
-|---|---|---|
-| **Exact-host scope** | Scope is hostname equality, not a suffix match, so `notcrawlme.monzo.com` is a different site from `crawlme.monzo.com`. | You can hand it one URL and trust it stays on that site. Enforced on stored links, so an off-host redirect is still followed. |
-| **One row per page** | Scheme and host lowercased, fragment dropped, query sorted, and a non-default port kept, so two spellings of a URL are one row. | Any analysis over the crawl store counts pages, not URLs that happen to differ. A duplicate cannot exist to be caught. |
-| **Atomic claims** | A claim is one `UPDATE ... RETURNING` inside `BEGIN IMMEDIATE`, so it returns exactly the rows the caller owns. | Scaling to several workers later needs no coordination layer: nobody is handed a row somebody else holds. |
-| **One crawlability predicate** | The read and both claim paths share one SQL string. | You can change what is due, once, and the read and the claim cannot drift apart. |
-| **Timeouts that recover lost work** | A `queued` row older than `queue_timeout`, or a `started_crawl` row older than `job_timeout`, is simply re-selected. | A crash between claiming and queueing loses nothing. No reconciliation service or change-data-capture stream is needed. |
-| **Dedupe at three levels** | `ON CONFLICT DO NOTHING`, one dict of outcomes per batch, and a set of discovered links, all keyed by canonical URL. | `times_crawled` is trustworthy as a re-crawl detector, so it can drive freshness checks. |
-| **Bulk SQL throughout** | Every write is a batch: one statement per batch for outcomes and discoveries, `executemany` for inserts. | Adding a field or a write costs one statement, not one per row. |
-| **Ordering that survives a crash** | The batch worker records, then queues, then commits, each only after the one before is durable. | An interrupted batch resumes rather than re-fetching pages it already did. |
-| **Writes on a timer** | The non-blocking worker accumulates a flush window and writes it in one go, 10ms by default. | Write throughput does not fall behind crawl throughput, and a slow page never delays a write. |
-| **Politeness that defers** | A wait reschedules one URL as `now + wait_ms` and moves on, rather than sleeping. | A real rate-limiter drops in without touching the worker, and no single URL can stall a batch. |
-| **Few locks** | Two, each guarding one shared session: the store's connection and the fetcher's. No lock guards application state. | Swapping either implementation cannot inherit a lock-ordering problem. |
-| **Non-reserving `peek`, head-based `commit`** | Reading a batch reserves nothing; committing removes at most what it was given. | Off-thread or multi-consumer consumers can be added, because the contract is already count-based. |
-| **Bounded queue with its own dead-letter half** | Both halves have separate capacity, and overflow is reported per message. | A failed URL is parked and auditable, and one full topic cannot discard a poll's claim. |
-| **Two workers, one port** | `CrawlerWorker` waits per batch; `CrawlerWorkerV1` never waits. Both satisfy `CrawlWorker`, chosen at the prompt. | You can switch the crawl strategy per run without touching a caller, which is also how you benchmark a change. |
-| **Two retryable error types** | A final answer (`NonRetryableError`) is re-raised at once; a transient one (`RetryableStatusError`) backs off. Not a subclass, so the policy tells them apart by type. | Adding an endpoint means deciding retryable or not by raising the right error; nothing inspects messages. |
-| **Retry owned by each I/O module** | The store and the fetcher each take a policy at construction, with their own settings; the poller and worker hold none. | Nothing is retried twice, and each component can be tuned to its own latency without a global knob. |
-| **Fetch slots count requests, not tasks** | The semaphore is held for a whole retry budget and released before link parsing. | `max_concurrent_fetches` bounds real traffic to a host, so throughput cannot be raised by accident. |
-| **Failures retried, successes not** | A spent fetch is due again in five minutes and its message is parked; a success with no re-crawl interval stores `NULL`. | A rate-limiting site gets a quiet window instead of a tight retry loop, and a finished page is never re-fetched. |
-| **One injected clock** | The store and both timeouts read the same `TimeProvider`, and timestamps go through a registered adapter. | `created_time == next_crawl_time` is a guarantee rather than a coincidence of two clocks, and text sorts chronologically. |
-| **A header middleware seam** | Middlewares apply in order just before each send; the shipped one presents as a browser. | Adding auth, cookies or a tenant header is one class and one line in the composition root. |
-| **Scoped failures** | A failed URL is one failed URL, a failed claim is one poll, and neither kills the worker. | A dead host slows the crawl rather than stopping it, and recovery is automatic through the timeouts. |
-| **Indexes the database can use** | Staleness is compared against the bare column and the epoch arithmetic happens on the bound parameter. | You can add a query against state and time without the planner abandoning both composite indexes. |
-| **Statements chunked under SQLite's limit** | Every bulk write is chunked, each binding the remaining budget so it cannot overshoot `max_items`. | A claim of any size works on the shipped store, and moving to Postgres makes the chunking unnecessary rather than wrong. |
+1. **Normalisation of URL** — `HTTPS://Example.com/a#top`, `https://example.com/a` and `http://example.com:80/a` are all stored as the same row, so one page is never crawled twice. And because scope is host equality, `notcrawlme.monzo.com` is skipped even though its name ends with `crawlme.monzo.com`.
+2. **The database hands each transaction an exclusive set of URLs** — Competing pollers and workers cannot claim the same URL, so running more consumers needs no coordination layer.
+3. **A stuck row is recovered by its timeout** — A row is marked `queued` or `started_crawl` before the work is picked up. If the process crashes before the next step, the row keeps that marking, and once it is older than its timeout the crawler picks it up again, so nothing stays stuck.
+4. **Dedupe at the application layer** — The repository's own signature takes a set and a dict, so a URL found twice is written once without the store ever being asked to spot the duplicate.
+5. **Bulk writes, one statement per batch** — A whole batch of outcomes and discovered links is a single statement, so write cost does not scale with how much the crawl finds.
+6. **A retry policy that differs by the nature of the I/O** — A locked database retries in milliseconds while a 429 backs off over seconds, and neither one starves the other's attempt budget.
+7. **A configurable cap on concurrent fetches** — Pages are fetched in parallel, but the number of fetches active at any moment has a configurable ceiling, 1000 by default, so at high scale the crawler bounds its own resource use instead of exhausting the machine.
+8. **A failed URL is rescheduled, not hammered** — Once a URL has used up its immediate retries it goes back on the queue five minutes later, configurable, so a site that is rate limiting or briefly down is given room to recover instead of being hit again straight away.
+9. **A politeness policy that keeps the crawler off a site's back** — Before every fetch the crawler asks the policy how long to wait. The shipped policy never waits, so nothing is throttled by default, but a policy that delays or rate limits per host drops in without any change to the worker.
+10. **Almost lock-free** — The application code holds no locks at all. The only two sit around the database connection and the HTTP session, so the crawl logic itself never blocks on shared state.
+11. **A dead-letter queue for URLs that keep failing** — A message that has failed even after its retries is parked in a separate queue, so those URLs are kept for inspection rather than silently dropped.
+12. **Extensible request middleware** — A middleware seam applies headers to every request. The shipped one is a simple static header set, but the same seam takes auth, cookies or per-tenant headers by adding one class.
+13. **Indexes on the database for faster queries** — Composite indexes over the state and time columns keep the query that picks the next URLs to crawl fast as the row count grows.
 
 
 ## Opportunities
