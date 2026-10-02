@@ -122,6 +122,63 @@ The above design is similar to [Apache Nutch](https://medium.com/@mobomo/the-bas
 
 The ability to schedule crawl later was helpful in crawling https://community.monzo.com which gets overwhelmed very quickly and starts giving 429s, in such case we schedule the url to for a crawl after 5 minutes(configurable). Also, crawling https://crawlme.monzo.com, https://monzo.com, amazon.in, flipkart and decathlon websites was also achieved.
 
+### URL Row State Changes
+
+Every state a URL row passes through, and the transition that moves it, labelled with the value the shipped configuration writes. The four states are [`CrawlState`](src/webcrawler/domain/crawl_state.py), the eligibility rule is one shared SQL predicate, and the durations are the constants in [`main.py`](src/webcrawler/main.py#L50-L57).
+
+```mermaid
+stateDiagram-v2
+    direction TB
+
+    classDef insert fill:#e8f4ea,stroke:#4a7
+    classDef claim fill:#e6eef7,stroke:#47a
+    classDef attempt fill:#fdf3e0,stroke:#c93
+    classDef terminal fill:#eceff1,stroke:#789
+
+    [*] --> not_crawled : create_urls or complete_crawl inserts a link.<br/>created_time = next_crawl_time = now,<br/>so the row is claimable at once
+
+    not_crawled --> queued : claim_candidates / claim_urls<br/>One UPDATE ... RETURNING inside BEGIN IMMEDIATE,<br/>so the caller receives only the rows it owns.
+
+    queued --> started_crawl : mark_started writes last_crawl_time.<br/>The batch worker's whole batch in one call,<br/>V1's flush window.
+
+    started_crawl --> finished_crawl : fetch succeeded.<br/>next_crawl_time = NULL,<br/>times_crawled + 1
+
+    started_crawl --> finished_crawl : fetch failed once its retries were spent.<br/>next_crawl_time = now + 5 min, times_crawled + 1,<br/>and the message is dead-lettered.
+
+    finished_crawl --> queued : next_crawl_time has passed.<br/>With re_crawl_interval set this is the scheduled<br/>re-crawl, after a failure it is the 5 min reschedule.
+
+    started_crawl --> queued : the worker died, or the complete_crawl<br/>write itself failed. After 2 min the predicate<br/>re-selects the row.
+
+    finished_crawl --> [*] : next_crawl_time IS NULL. The predicate's finished<br/>branch tests next_crawl_time <= :now, and NULL <= now<br/>is never true, so the row is never claimed again.
+
+    note right of queued
+        Two rows are reclaimed without ever
+        being picked up again. A queued row
+        whose message was lost, or whose topic
+        was full, is eligible again once it is
+        60 minutes old. A started_crawl row is
+        eligible once it is 2 minutes old.
+        Neither transition is a state change:
+        the row is already in that state, and
+        the predicate simply selects it again.
+    end note
+
+    note right of finished_crawl
+        One state covers both outcomes.
+        complete_crawl always writes
+        finished_crawl, so what separates a
+        success from a failure is next_crawl_time:
+        NULL against a time five minutes out.
+    end note
+
+    class not_crawled insert
+    class queued claim
+    class started_crawl attempt
+    class finished_crawl terminal
+```
+
+Editable source: [`docs/url_row_state.mmd`](docs/url_row_state.mmd). Two details the diagram makes plain: a failed fetch lands in `finished_crawl` like a success does, because `complete_crawl` writes that state unconditionally and only `next_crawl_time` tells them apart; and reclaiming a lost message or a dead worker is not a state change at all, since the row is already in that state and the predicate simply selects it again once its timeout has passed.
+
 ## Low Level Design
 
 ### Layout
@@ -652,87 +709,36 @@ inspection queries below, so it is installed separately.
 For manual E2E test, refer the [How To Run It](#how-to-run-it) section above.
 
 
-## Design Decisions
-
-The choices that are not obvious from the code, each with what it cost.
-
-| Decision | Why | What it cost |
-|---|---|---|
-| Modules in folders on one event loop, not a service per module | The brief asked for a production shape without a deployment's worth of moving parts. One process means one queue, one store, and no network hop between the poller and the worker. | No horizontal scale for free. Raising throughput means more workers, which needs a broker that honours the partition key. |
-| One batch, one transaction, one commit | `complete_crawl` writes every outcome and every discovered URL atomically, so a crash cannot leave a page recorded without its links. | Only a worker that waits for its batch can afford it. `CrawlerWorkerV1` never waits, so a failed write leaves its rows `started_crawl` for `job_timeout` and its snapshot is dropped. |
-| `complete_crawl` before `enqueue_urls` before `commit`, in the batch worker | Each step only after the one before it is durable. `enqueue_urls` claims the rows the insert created, and `commit` acknowledges work that is only finished once recorded. | The batch worker can pay for it because it waits. `CrawlerWorkerV1` commits as its tasks are created, so it gets the throughput and gives up the ordering, recovering through `job_timeout` instead. |
-| A queue timeout stands in for a CDC pipeline | If a row reaches `queued` and the process dies before the message is sent, no change-data-capture stream exists to reconcile the two. A `queued` row older than `queue_timeout` is simply re-selected. | A lost message waits out the timeout. Set to 60 minutes, because at 30s a real backlog was being re-fetched while it still waited. |
-| Two retry settings, not one | A locked database frees in milliseconds; a 429 clears only on a seconds-scale window. One value fitted neither: it exhausted the whole attempt budget on backoff alone before a single page was tried. | Two constants to keep coherent, and the fetch budget must stay under `JOB_TIMEOUT` or a still-retrying URL is claimed twice. |
-| A politeness wait defers, it never sleeps | One slow URL must not stall a batch, so the URL is rescheduled as `now + wait_ms` and the batch moves on. | A delaying policy is therefore not a throttle, it is a scheduler hint. Real pacing would need a per-host cap, which the brief does not ask for. |
-| Two workers behind one `CrawlWorker` port, picked at the prompt | They lose in opposite directions. The batch worker is ahead when every page answers in milliseconds; the non-blocking one is far ahead when one page stalls, since the batch worker leaves its whole batch waiting. Which case a run hits is not knowable before the run. | The operator chooses per run, and the two have to be kept at behavioural parity, since the port declares them the same worker. |
-| Bulk writes on a timer, not on a batch boundary | Waiting for a batch delays every write by its slowest fetch, and the non-blocking worker has no batch to wait for. | A write lands up to `flush_interval_seconds` late, and a crash inside that window leaves those rows for `job_timeout` to reclaim. The period is 10ms, which is past the knee: on a chain-shaped site 0.5s managed 20 pages in 20s where 10ms managed 335, but going from 50ms to 10ms bought only 1.4x more, because the per-page fetch and store cost starts to dominate the window. |
-| Dedupe with sets and dicts, keyed by canonical URL | Two spellings of one page are the same string, so a duplicate is impossible by construction rather than something to check for. `times_crawled` can then be trusted as a re-crawl detector. | A URL that is both finished and discovered in one batch is written once, so the finish update has to win over the insert. |
-| One crawlable predicate shared by the read and the claim | Two copies of that SQL would eventually disagree, and the disagreement would be silent. | None, once it is one string. |
-| Bulk statements chunked under SQLite's parameter limit | A 1200-URL batch exceeds the 999 bound-parameter ceiling, so statements are chunked, each binding the remaining limit so chunking cannot overshoot `max_items`. | Bound to SQLite. Postgres has no such ceiling, so the chunking becomes unnecessary rather than wrong. |
-| Empty input issues no statement | `IN ()` is rejected outright by some engines, so an empty set short-circuits. | None, and it makes the empty case cheap. |
-| Retry owned by the I/O implementation | The store and the fetcher each hold a policy; the poller and the worker hold none, so nothing is retried twice. A `commit` is never retried either, being head-based, so a second attempt would remove more than the batch owns. | A caller cannot add its own retry without risking a double. |
-| The in-memory queue has no lock | CPU-bound on a single event loop, and the shipped path has exactly one reader. | A second reader would need one. The `peek`/`commit` contract is already count-based, so it would not change the callers. |
-| Tests mock every collaborator | A unit test that builds a real store and a real queue tests the implementation twice and breaks whenever it is refactored. | The store's own SQL is asserted through a mocked `aiosqlite` connection rather than a real database, so it is checked as calls and parameters, not as stored state. |
-| 97 tests, happy path and the failure that matters | A test earns its place by naming a decision. The failing paths kept are the ones that change what happens next: a fetch that fails without stopping its batch, a `complete_crawl` that fails without enqueueing, a claim that exhausts its budget. Both workers are covered, so the port that stands between them has both sides of the contract tested. | No coverage measurement is configured, so the number is unverified. NFR4. |
-
-
 ## Key Features
 
-- **Exact-host scope, not suffix matching.** `notcrawlme.monzo.com` ends with
-  `crawlme.monzo.com` and is still a different site, so scope is hostname
-  equality.
-- **One row per logical page.** Canonicalisation lowercases the scheme and
-  host, drops the fragment and a scheme-default port, and sorts the query, so
-  two spellings of the same URL are one row. The primary key is the canonical
-  text itself, with no surrogate id.
-- **One predicate for reading and claiming.** `get_crawlable_urls`,
-  `claim_candidates`, and `claim_urls` share a single SQL predicate string, so
-  they cannot disagree about what is crawlable. A row is claimable when it is
-  new, when `next_crawl_time` has passed, or when it has been `queued` or
-  `started_crawl` for longer than its timeout.
-- **Timeouts stand in for a CDC pipeline.** If a row reaches `queued` but the
-  process dies before the message is sent, no change-data-capture stream
-  reconciles it. A row stuck in `queued` past `queue_timeout` is simply
-  re-selected, and one stuck in `started_crawl` past `job_timeout` is treated
-  the same way. Both are the same mechanism, so there is nothing to reconcile.
-- **Dedupe at three levels.** `ON CONFLICT DO NOTHING` on insert, a dict of
-  outcomes so one row is written once per batch, and a set of discovered links.
-  A URL that is both finished and discovered in the same batch is written once,
-  so `times_crawled` cannot jump.
-- **Ordering that survives a crash.** In the batch worker the order is
-  `complete_crawl`, then `enqueue_urls`, then `commit`, each step only after the
-  one before it is durable, so an interrupted batch resumes rather than
-  duplicating work. `CrawlerWorkerV1` deliberately inverts the outer two: it
-  commits the batch as its crawl tasks are *created*, because it never waits for
-  them, and recovers through `job_timeout` rather than through an ordering.
-- **Politeness defers, it never sleeps.** A non-zero wait reschedules that one
-  URL as `now + wait_ms` and moves on, so one slow URL cannot stall a batch, and
-  a real rate-limiting policy drops in without touching the worker.
-- **Two workers, one port.** `CrawlerWorker` waits for a whole batch and writes
-  once at the end of it; `CrawlerWorkerV1` detaches a crawl per message, holds up
-  to 1000 fetches in flight and writes the store every 10ms. `main.py` asks which
-  one to build, and the orchestrator only ever calls `run` and `close`.
-- **Retry belongs to the I/O modules.** The store and the fetcher each hold a
-  policy; the poller and the worker hold none, so nothing is retried twice. The
-  two settings differ, because a locked database frees in milliseconds while a
-  429 clears only on a seconds-scale window, and one shared value exhausted the
-  attempt budget on backoff alone. A non-retryable status fails on the first
-  attempt, and a transport error or timeout backs off exponentially with jitter.
-- **A failed URL is retried, a finished one is not.** A fetch that exhausts
-  its attempts records `next_crawl_time = now + reschedule_delay`, so the row
-  becomes due again in five minutes instead of spinning on a dead host, and the
-  message is dead-lettered so the queue hands out that URL only once. A URL that
-  *succeeds* with no re-crawl interval configured records a `NULL`
-  `next_crawl_time`, which the predicate never selects, so it is never fetched
-  again.
-- **Indexes the database can actually use.** Staleness is compared against the
-  bare column rather than a `strftime(...)` wrapper, and the epoch arithmetic
-  happens on the bound parameter, so both composite indexes stay eligible. On
-  the demo site this took the selection query from ~60 ms to ~8 ms.
-- **Bulk statements that respect SQLite's limit.** Every bulk write is chunked
-  to stay under the 999 bound-parameter ceiling, with each chunk binding the
-  remaining limit so chunking cannot overshoot `max_items`. An empty input
-  issues no statement at all, because `IN ()` is rejected outright.
+What the crawler does, and what each behaviour enables you to build on.
+
+| Feature | What it is | What it enables |
+|---|---|---|
+| **Exact-host scope** | Scope is hostname equality, not a suffix match, so `notcrawlme.monzo.com` is a different site from `crawlme.monzo.com`. | You can hand it one URL and trust it stays on that site. Enforced on stored links, so an off-host redirect is still followed. |
+| **One row per page** | Scheme and host lowercased, fragment dropped, query sorted, and a non-default port kept, so two spellings of a URL are one row. | Any analysis over the crawl store counts pages, not URLs that happen to differ. A duplicate cannot exist to be caught. |
+| **Atomic claims** | A claim is one `UPDATE ... RETURNING` inside `BEGIN IMMEDIATE`, so it returns exactly the rows the caller owns. | Scaling to several workers later needs no coordination layer: nobody is handed a row somebody else holds. |
+| **One crawlability predicate** | The read and both claim paths share one SQL string. | You can change what is due, once, and the read and the claim cannot drift apart. |
+| **Timeouts that recover lost work** | A `queued` row older than `queue_timeout`, or a `started_crawl` row older than `job_timeout`, is simply re-selected. | A crash between claiming and queueing loses nothing. No reconciliation service or change-data-capture stream is needed. |
+| **Dedupe at three levels** | `ON CONFLICT DO NOTHING`, one dict of outcomes per batch, and a set of discovered links, all keyed by canonical URL. | `times_crawled` is trustworthy as a re-crawl detector, so it can drive freshness checks. |
+| **Bulk SQL throughout** | Every write is a batch: one statement per batch for outcomes and discoveries, `executemany` for inserts. | Adding a field or a write costs one statement, not one per row. |
+| **Ordering that survives a crash** | The batch worker records, then queues, then commits, each only after the one before is durable. | An interrupted batch resumes rather than re-fetching pages it already did. |
+| **Writes on a timer** | The non-blocking worker accumulates a flush window and writes it in one go, 10ms by default. | Write throughput does not fall behind crawl throughput, and a slow page never delays a write. |
+| **Politeness that defers** | A wait reschedules one URL as `now + wait_ms` and moves on, rather than sleeping. | A real rate-limiter drops in without touching the worker, and no single URL can stall a batch. |
+| **Few locks** | Two, each guarding one shared session: the store's connection and the fetcher's. No lock guards application state. | Swapping either implementation cannot inherit a lock-ordering problem. |
+| **Non-reserving `peek`, head-based `commit`** | Reading a batch reserves nothing; committing removes at most what it was given. | Off-thread or multi-consumer consumers can be added, because the contract is already count-based. |
+| **Bounded queue with its own dead-letter half** | Both halves have separate capacity, and overflow is reported per message. | A failed URL is parked and auditable, and one full topic cannot discard a poll's claim. |
+| **Two workers, one port** | `CrawlerWorker` waits per batch; `CrawlerWorkerV1` never waits. Both satisfy `CrawlWorker`, chosen at the prompt. | You can switch the crawl strategy per run without touching a caller, which is also how you benchmark a change. |
+| **Two retryable error types** | A final answer (`NonRetryableError`) is re-raised at once; a transient one (`RetryableStatusError`) backs off. Not a subclass, so the policy tells them apart by type. | Adding an endpoint means deciding retryable or not by raising the right error; nothing inspects messages. |
+| **Retry owned by each I/O module** | The store and the fetcher each take a policy at construction, with their own settings; the poller and worker hold none. | Nothing is retried twice, and each component can be tuned to its own latency without a global knob. |
+| **Fetch slots count requests, not tasks** | The semaphore is held for a whole retry budget and released before link parsing. | `max_concurrent_fetches` bounds real traffic to a host, so throughput cannot be raised by accident. |
+| **Failures retried, successes not** | A spent fetch is due again in five minutes and its message is parked; a success with no re-crawl interval stores `NULL`. | A rate-limiting site gets a quiet window instead of a tight retry loop, and a finished page is never re-fetched. |
+| **One injected clock** | The store and both timeouts read the same `TimeProvider`, and timestamps go through a registered adapter. | `created_time == next_crawl_time` is a guarantee rather than a coincidence of two clocks, and text sorts chronologically. |
+| **A header middleware seam** | Middlewares apply in order just before each send; the shipped one presents as a browser. | Adding auth, cookies or a tenant header is one class and one line in the composition root. |
+| **Scoped failures** | A failed URL is one failed URL, a failed claim is one poll, and neither kills the worker. | A dead host slows the crawl rather than stopping it, and recovery is automatic through the timeouts. |
+| **Indexes the database can use** | Staleness is compared against the bare column and the epoch arithmetic happens on the bound parameter. | You can add a query against state and time without the planner abandoning both composite indexes. |
+| **Statements chunked under SQLite's limit** | Every bulk write is chunked, each binding the remaining budget so it cannot overshoot `max_items`. | A claim of any size works on the shipped store, and moving to Postgres makes the chunking unnecessary rather than wrong. |
+
 
 ## Opportunities
 

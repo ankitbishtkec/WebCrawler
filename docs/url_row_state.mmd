@@ -1,0 +1,69 @@
+---
+title: URL row state changes, as configured in main.py
+---
+%% The four row states and every transition between them, with the shipped
+%% configuration. The four states are CrawlState in domain/crawl_state.py, the
+%% predicate is crawlable_predicate() in infrastructure/db/models.py, and the
+%% writers are the store methods of the same name.
+%%
+%% Shipped configuration, from main.py:
+%%   RESCHEDULE_DELAY = 5 minutes   a failed fetch becomes due again this far out
+%%   JOB_TIMEOUT      = 2 minutes   a started_crawl row is abandoned this long after
+%%   QUEUE_TIMEOUT    = 60 minutes  a queued row whose message was lost is re-claimed this long after
+%%   re_crawl_interval = None       main.py does not pass it, so a success is terminal
+%%
+%% How to view it:
+%%   - GitHub: open this file and it renders in the built-in preview.
+%%   - Anything else: paste the block into https://mermaid.live
+%%   - To a PNG instead, from the project root, with Chrome already installed:
+%%       npx -y @mermaid-js/mermaid-cli -i docs/url_row_state.mmd \
+%%         -o docs/url_row_state.png -b white -s 2
+
+stateDiagram-v2
+    direction TB
+
+    classDef insert fill:#e8f4ea,stroke:#4a7
+    classDef claim fill:#e6eef7,stroke:#47a
+    classDef attempt fill:#fdf3e0,stroke:#c93
+    classDef terminal fill:#eceff1,stroke:#789
+
+    [*] --> not_crawled : create_urls or complete_crawl inserts a link.<br/>created_time = next_crawl_time = now,<br/>so the row is claimable at once
+
+    not_crawled --> queued : claim_candidates / claim_urls<br/>One UPDATE ... RETURNING inside BEGIN IMMEDIATE,<br/>so the caller receives only the rows it owns.
+
+    queued --> started_crawl : mark_started writes last_crawl_time.<br/>The batch worker's whole batch in one call,<br/>V1's flush window.
+
+    started_crawl --> finished_crawl : fetch succeeded.<br/>next_crawl_time = NULL,<br/>times_crawled + 1
+
+    started_crawl --> finished_crawl : fetch failed once its retries were spent.<br/>next_crawl_time = now + 5 min, times_crawled + 1,<br/>and the message is dead-lettered.
+
+    finished_crawl --> queued : next_crawl_time has passed.<br/>With re_crawl_interval set this is the scheduled<br/>re-crawl, after a failure it is the 5 min reschedule.
+
+    started_crawl --> queued : the worker died, or the complete_crawl<br/>write itself failed. After 2 min the predicate<br/>re-selects the row.
+
+    finished_crawl --> [*] : next_crawl_time IS NULL. The predicate's finished<br/>branch tests next_crawl_time <= :now, and NULL <= now<br/>is never true, so the row is never claimed again.
+
+    note right of queued
+        Two rows are reclaimed without ever
+        being picked up again. A queued row
+        whose message was lost, or whose topic
+        was full, is eligible again once it is
+        60 minutes old. A started_crawl row is
+        eligible once it is 2 minutes old.
+        Neither transition is a state change:
+        the row is already in that state, and
+        the predicate simply selects it again.
+    end note
+
+    note right of finished_crawl
+        One state covers both outcomes.
+        complete_crawl always writes
+        finished_crawl, so what separates a
+        success from a failure is next_crawl_time:
+        NULL against a time five minutes out.
+    end note
+
+    class not_crawled insert
+    class queued claim
+    class started_crawl attempt
+    class finished_crawl terminal
