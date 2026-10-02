@@ -4,6 +4,11 @@ An async, single-process web crawler. Give it one seed URL; it crawls every
 page on that exact host, keeps crawl state in SQLite, and moves work through a
 topic queue. `Ctrl+C` stops it.
 
+## Disclosure
+- AI has been used to code it, however all the decision, code reviews, validations are owned by me.
+- It took around 16 core hours to code this.
+- The problem is very interesting and its open endedness along with extensibility make it very enjoyable.
+
 ## Problem Statement
 
 Given a starting URL, visit every URL found on the same domain and print each
@@ -22,8 +27,6 @@ tests, rather than in presentation.
 
 ## Functional Requirements
 
-The brief, taken from its opening paragraph, asks for exactly three things.
-
 | # | Requirement | How it is met |
 |---|---|---|
 | FR1 | Given a starting URL, visit each URL found on the same domain. | The seed is the only entry point; the crawl follows links outward from it and runs until interrupted. |
@@ -32,40 +35,23 @@ The brief, taken from its opening paragraph, asks for exactly three things.
 
 ## Non-Functional Requirements
 
-Taken from the brief's own coding requirements, one row each, with where it
-actually stands. Anything the brief did not ask for is not here: the qualities
-it did not ask for are its functional requirements, its design section, or the
-schema below.
-
 | # | Requirement | Status |
 |---|---|---|
-| NFR1 | **Own implementation, no crawling framework.** `scrapy` and `go-colly` are out; a library for HTML parsing is welcome. | Met. No crawling framework is used. `utils/html_parser.py` wraps the standard library's `HTMLParser`, and the crawl loop, the scheduler and the queue are all in `application/` and `infrastructure/`. |
-| NFR2 | **Written as production code.** The brief asks about structure, trade-offs, observable behaviour and concurrency, not presentation. | Met. The design decisions and what each cost are recorded under Design Decisions, the observable behaviour under Functional Requirements, and the only interface is a prompt and the log. |
-| NFR3 | **Use concurrency.** | Met. `CrawlerWorker` fetches a whole batch in one `asyncio.TaskGroup`; `CrawlerWorkerV1` detaches a crawl per message and holds up to 1000 fetches in flight, which measured 18381 pages against 4856 in 35s on a fast site. Both on the one event loop. |
-| NFR4 | **Unit tests, parameterized, with good coverage.** | Partial. 97 unit tests, 40 of them parameterized cases, every collaborator mocked, so the suite runs in a second with no network. Coverage is not measured: no coverage tool is configured, so the number is unverified rather than high. |
-| NFR5 | **Composition over inheritance, and SOLID.** | Met. Every collaborator is a constructor argument passed in from `main.py`. The only classes that extend a port are the store and the two workers, and nothing extends those in turn. |
-| NFR6 | **The database, the queue and every major class sit behind an interface, with a simple default implementation.** | Met. Eleven interfaces in `ports/`; the defaults are a SQLite store and a `collections.deque` queue, both written here. `CrawlWorker` ships two implementations, so the port is a choice rather than a formality. |
-| NFR7 | **Modules in separate folders, one asyncio event loop for all, and an orchestrator module that runs them.** | Met. `domain/`, `ports/`, `application/`, `infrastructure/`, `utils/`; `Orchestrator` is the only place a task is created or stopped. |
-| NFR8 | **Async APIs wherever possible.** | Met. Everything under `ports/` is `async` except the three pure-CPU boundaries: link extraction, the clock and request middleware. |
-| NFR9 | **A module making I/O calls owns its retry: exponential backoff with jitter, and a timeout.** | Met. The store and the fetcher each hold a `RetryPolicy`; the poller and both workers hold none, so nothing is retried twice, and the two retry settings differ because a locked database frees in milliseconds while a 429 clears on a seconds window. |
+| NFR1 | **Own implementation, no crawling framework.** | Met. No crawling framework is used. |
+| NFR2 | **Written as production code.** | Met. The subsequent sections on HLD and LLD can validate this|
+| NFR3 | **Use concurrency.** | Met. `CrawlerWorker` fetches a whole batch in one `asyncio.TaskGroup`; `CrawlerWorkerV1` detaches a crawl per message and holds up to 1000(configurable) fetches in flight. Both on the one event loop. |
+| NFR4 | **Unit tests, parameterized, with good coverage.** | Partial. 97 unit tests, 40 of them parameterized cases, every collaborator mocked. Coverage is not measured yet, so it is partial. |
+| NFR5 | **Composition over inheritance, and SOLID principles.** | Met. Refer LLD section. |
+| NFR6 | **Prod readiness.** | Partial Met. Besides feature flags, metrics and dashboards; we have nearly all components in the code at the very least in a basic implementation of ports(abstract base class). All components are plug and play. |
+| NFR8 | **Async APIs wherever possible.** | Met. Nearly everything under `ports/` is `async`. |
+| NFR9 | **A module making I/O calls owns its retry: exponential backoff with jitter, and a timeout.** | Met. The store and the fetcher each hold a `RetryPolicy`. |
 | NFR10 | **Complete signatures: every function documents its arguments, its return and the exceptions a caller must handle.** | Met. On every port method, every constructor and every method that can raise. |
-| NFR11 | **Concise comments before the non-obvious: eureka logic, design decisions, race-condition avoidance, trade-offs. Nothing obvious is commented.** | Met. The comments are the reasoning, not the syntax: why a claim needs no lock, why a politeness wait defers instead of sleeping, why a batch is committed before its fetches finish. |
-| NFR12 | **Production-level design without a service per module; scale by substitution.** | Met by substitution. The store, the queue and the fetcher sit behind interfaces, so the process scales by swapping them, not by adding services. It does not scale by size: one process, one worker instance, one event loop. |
-| NFR13 | **A politeness policy decides when a URL may be fetched, with a no-op default, as the design section specifies.** | Met. `NoOpPolitenessPolicy` reports 0 ms for every URL, which is what the brief asks for, so nothing throttles today; a delaying policy drops in without touching the worker, and a positive wait reschedules that one URL instead of stalling anything. |
+| NFR12 | **Ability to handle high scale.** | Met by substitution. The infra components like queue, db etc sit behind interfaces, so the process scales by swapping them with real components Kafka, Dynamodb etc. Also the `ports` have hints to make it scalable like partitioning etc.|
 
-Five things that were in this table before are not qualities of the system, and
-have moved to where they belong: the UTC timestamps and
-`next_crawl_time = created_time` on insert, the primary-key and composite
-indexes, and the `SQLite >= 3.35` floor for `UPDATE ... RETURNING` are the
-**Database schema** below; a finished URL never being re-claimed without a
-configured interval is a **behaviour** in Key Features. Two rows were dropped
-as invented rather than invalid: *"not overly saturate the crawled website"*
-and *"fast"* are real concerns, but the brief asks for neither, and neither is
-something the crawl can claim without qualification.
 
 ## High Level Design
 
-<!-- Intentionally empty at this stage. -->
+![Current crawler HLD](docs/current_crawler_HLD.png)
 
 ## Low Level Design
 
@@ -642,46 +628,9 @@ together, which is why the swap table above lists the pair.
 
 ### Database schema
 
-One table, `urls`, in `webcrawler.db`. Every timestamp is a UTC `TEXT` in
-SQLite's `YYYY-MM-DD HH:MM:SS` form, which sorts correctly as a string and lets
-`CURRENT_TIMESTAMP` be used as a default.
+Please refer HLD diagram
 
-| Column | Type | Null | Default | Meaning |
-|---|---|---|---|---|
-| `custom_url` | `TEXT` | no | | **Primary key.** The canonical URL text itself, not a surrogate id. |
-| `created_time` | `TEXT` | no | `CURRENT_TIMESTAMP` | When the crawler first learned the URL. |
-| `last_crawl_time` | `TEXT` | yes | | When a worker last began crawling it. `NULL` until the first attempt. |
-| `next_crawl_time` | `TEXT` | yes | `CURRENT_TIMESTAMP` | The earliest time the URL may be claimed. Set equal to `created_time` on insert, so a new row is immediately claimable. |
-| `state` | `TEXT` | no | `'not_crawled'` | One of `not_crawled`, `queued`, `started_crawl`, `finished_crawl`. |
-| `last_status_update_time` | `TEXT` | no | `CURRENT_TIMESTAMP` | When the row last changed state. The two staleness timeouts compare against this. |
-| `times_crawled` | `INTEGER` | no | `0` | Incremented once per completed crawl. Makes a re-crawl loop visible in the data alone. |
-
-The primary key is the URL itself, the canonical text rather than a surrogate id,
-so two spellings of one page are the same string and a duplicate is impossible by
-construction.
-
-**Indexes.** Three exist, one of them SQLite's own for the primary key:
-
-| Index | Columns | Serves |
-|---|---|---|
-| `sqlite_autoindex_urls_1` | `custom_url` | the primary key lookup |
-| `idx_urls_state_next` | `(state, next_crawl_time)` | claiming due URLs, which orders by `next_crawl_time` |
-| `idx_urls_state_status` | `(state, last_status_update_time)` | the two staleness branches, which range over `last_status_update_time` within one state |
-
-The second index is why staleness is compared against the bare column rather than
-wrapped in `strftime(...)`, which would stop the index matching. `EXPLAIN QUERY
-PLAN` confirms both are used, combined as a `MULTI-INDEX OR`.
-
-Two guards are deliberately absent, because each looks like hygiene and quietly
-breaks recovery. There is no `NOT NULL` on `next_crawl_time`, since a `NULL`
-there is how a finished URL records "never again" and `NULL <= :now` is never
-true. And the claim has no `state NOT IN (...)` filter, nor a top-level
-`next_crawl_time IS NOT NULL` guard, because either would permanently exclude the
-two staleness branches that reclaim abandoned work.
-
-The SQL itself lives in `src/webcrawler/infrastructure/db/models.py`, with the
-crawlable predicate written once and shared by the read and the claim so the two
-cannot disagree.
+DDL and DML commands `src/webcrawler/infrastructure/db/models.py`
 
 ### `pyproject.toml`
 
