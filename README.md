@@ -123,6 +123,8 @@ domain(aka models)  <-  ports(aka interfaces)
 
 UML diagram for the code via mermaid format. Please use apt renderer for mermaid format to view it. paste the block [`docs/uml.mmd`](docs/uml.mmd) into https://mermaid.live.
 
+[![WebCrawler UML](docs/uml.mmd)](docs/uml.mmd)
+
 ### Database schema
 
 Please refer HLD diagram
