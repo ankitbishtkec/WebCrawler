@@ -645,6 +645,14 @@ lockfile.
 `sqlite-utils` is **not** a dependency. It is only a convenience for the
 inspection queries below, so it is installed separately.
 
+## Test Strategy
+
+<!--
+  PLACEHOLDER - to be written.
+  Cover: what is unit-tested versus integration-tested, how concurrency is (and
+  is not) tested without flakiness, and how the parameterised cases are chosen.
+-->
+
 ## Design Decisions
 
 The choices that are not obvious from the code, each with what it cost.
@@ -726,14 +734,6 @@ The choices that are not obvious from the code, each with what it cost.
   to stay under the 999 bound-parameter ceiling, with each chunk binding the
   remaining limit so chunking cannot overshoot `max_items`. An empty input
   issues no statement at all, because `IN ()` is rejected outright.
-
-## Test Strategy
-
-<!--
-  PLACEHOLDER - to be written.
-  Cover: what is unit-tested versus integration-tested, how concurrency is (and
-  is not) tested without flakiness, and how the parameterised cases are chosen.
--->
 
 ## Opportunities
 
