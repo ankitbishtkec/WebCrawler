@@ -25,6 +25,70 @@ way a production service would be, since the interest is in the design, the
 structure, the trade-offs, the observable behaviour, the concurrency, and the
 tests, rather than in presentation.
 
+## How To Run It
+
+Assumes a fresh Mac, source only, no Python packages installed. Python 3.11 is
+the floor and a stock macOS `python3` is often older; if `python3 --version`
+says less, `brew install python@3.12` and use `python3.12` below.
+
+```bash
+cd /path/to/WebCrawler
+python3 -m venv .venv && source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+```
+
+**Run it.** It prompts for a seed URL and then for a worker; both defaults are
+fine, and it explains each choice as it asks.
+
+```bash
+python -m webcrawler.main           # add --debug for DEBUG logging
+```
+
+It logs every visited page and its links, from `worker` or `worker_v1`
+depending on your choice:
+
+```
+2026-09-29 21:14:34 INFO webcrawler.application.worker: visited https://crawlme.monzo.com/index.html, found 10 link(s): [...]
+```
+
+`Ctrl+C` stops it and closes the database and session.
+
+**Verify the crawl worked.** State lives in `webcrawler.db`. `sqlite-utils` is
+needed only for this step: `python -m pip install sqlite-utils`.
+
+```bash
+# rows per state, with timestamps and the crawl counter
+python -m sqlite_utils query webcrawler.db "select state, count(*) as n, min(times_crawled) as min_crawled, max(times_crawled) as max_crawled, min(last_crawl_time) as first_crawl, max(last_crawl_time) as last_crawl from urls group by state" --table
+
+# the dedupe invariant: must return no rows
+python -m sqlite_utils query webcrawler.db "select custom_url, times_crawled from urls where times_crawled > 1" --table
+
+# a sample of what was stored
+python -m sqlite_utils query webcrawler.db "select custom_url, state, times_crawled, last_status_update_time from urls order by random() limit 5" --table
+
+# consistent even after an abrupt stop
+python -m sqlite_utils query webcrawler.db "pragma integrity_check" --table
+```
+
+A finished crawl of the default site ends with every row `finished_crawl` and
+`max_crawled` of `1`. Rows left in `queued` or `started_crawl` were in flight
+when you stopped; the timeouts reclaim them on the next run.
+
+**Clean up.**
+
+```bash
+# Ctrl+C the crawler first; lsof webcrawler.db finds a detached one holding the file
+rm -f webcrawler.db
+deactivate
+```
+
+**Tests**
+
+```bash
+python -m pytest
+```
+
 ## Functional Requirements
 
 | # | Requirement | How it is met |
@@ -604,67 +668,6 @@ The choices that are not obvious from the code, each with what it cost.
 | Tests mock every collaborator | A unit test that builds a real store and a real queue tests the implementation twice and breaks whenever it is refactored. | The store's own SQL is asserted through a mocked `aiosqlite` connection rather than a real database, so it is checked as calls and parameters, not as stored state. |
 | 97 tests, happy path and the failure that matters | A test earns its place by naming a decision. The failing paths kept are the ones that change what happens next: a fetch that fails without stopping its batch, a `complete_crawl` that fails without enqueueing, a claim that exhausts its budget. Both workers are covered, so the port that stands between them has both sides of the contract tested. | No coverage measurement is configured, so the number is unverified. NFR4. |
 
-## How To Run It
-
-Assumes a fresh Mac, source only, no Python packages installed. Python 3.11 is
-the floor and a stock macOS `python3` is often older; if `python3 --version`
-says less, `brew install python@3.12` and use `python3.12` below.
-
-```bash
-cd /path/to/WebCrawler
-python3 -m venv .venv && source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
-```
-
-**Run it.** It prompts for a seed URL and then for a worker; both defaults are
-fine, and it explains each choice as it asks.
-
-```bash
-python -m webcrawler.main           # add --debug for DEBUG logging
-```
-
-It logs every visited page and its links, from `worker` or `worker_v1`
-depending on your choice:
-
-```
-2026-09-29 21:14:34 INFO webcrawler.application.worker: visited https://crawlme.monzo.com/index.html, found 10 link(s): [...]
-```
-
-`Ctrl+C` stops it and closes the database and session.
-
-**Verify the crawl worked.** State lives in `webcrawler.db`. `sqlite-utils` is
-needed only for this step: `python -m pip install sqlite-utils`.
-
-```bash
-# rows per state, with timestamps and the crawl counter
-python -m sqlite_utils query webcrawler.db "select state, count(*) as n, min(times_crawled) as min_crawled, max(times_crawled) as max_crawled, min(last_crawl_time) as first_crawl, max(last_crawl_time) as last_crawl from urls group by state" --table
-
-# the dedupe invariant: must return no rows
-python -m sqlite_utils query webcrawler.db "select custom_url, times_crawled from urls where times_crawled > 1" --table
-
-# a sample of what was stored
-python -m sqlite_utils query webcrawler.db "select custom_url, state, times_crawled, last_status_update_time from urls order by random() limit 5" --table
-
-# consistent even after an abrupt stop
-python -m sqlite_utils query webcrawler.db "pragma integrity_check" --table
-```
-
-A finished crawl of the default site ends with every row `finished_crawl` and
-`max_crawled` of `1`. Rows left in `queued` or `started_crawl` were in flight
-when you stopped; the timeouts reclaim them on the next run.
-
-**Tests, then clean up.**
-
-```bash
-python -m pytest
-
-# Ctrl+C the crawler first; lsof webcrawler.db finds a detached one holding the file
-rm -f webcrawler.db
-deactivate
-```
-
-Nothing else is written to the project directory besides webcrawler.db.
 
 ## Key Features
 
