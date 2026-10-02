@@ -647,9 +647,9 @@ inspection queries below, so it is installed separately.
 
 ## Test Strategy
 
-97 tests across [tests/](tests/), are nearly all mocking the dependencies. They have happy and unhappy path tests.. There are no integration tests and no live HTTP: the crawl is verified by what the store returns, not by what a real server does.
+97 tests across [tests/](tests/), are nearly all mocking the dependencies when testing the unit. They test happy and unhappy path . There are no integration tests and no live HTTP: the crawl is verified by what the store returns, not by what a real server does.
 
-For manual E2E test, refer the Section above "How to run"
+For manual E2E test, refer the [How To Run It](#how-to-run-it) section above.
 
 
 ## Design Decisions
