@@ -122,63 +122,6 @@ The above design is similar to [Apache Nutch](https://medium.com/@mobomo/the-bas
 
 The ability to schedule crawl later was helpful in crawling https://community.monzo.com which gets overwhelmed very quickly and starts giving 429s, in such case we schedule the url to for a crawl after 5 minutes(configurable). Also, crawling https://crawlme.monzo.com, https://monzo.com, amazon.in, flipkart and decathlon websites was also achieved.
 
-### URL Row State Changes
-
-Every state a URL row passes through, and the transition that moves it, labelled with the value the shipped configuration writes. The four states are [`CrawlState`](src/webcrawler/domain/crawl_state.py), the eligibility rule is one shared SQL predicate, and the durations are the constants in [`main.py`](src/webcrawler/main.py#L50-L57).
-
-```mermaid
-stateDiagram-v2
-    direction TB
-
-    classDef insert fill:#e8f4ea,stroke:#4a7
-    classDef claim fill:#e6eef7,stroke:#47a
-    classDef attempt fill:#fdf3e0,stroke:#c93
-    classDef terminal fill:#eceff1,stroke:#789
-
-    [*] --> not_crawled : create_urls or complete_crawl inserts a link.<br/>created_time = next_crawl_time = now,<br/>so the row is claimable at once
-
-    not_crawled --> queued : claim_candidates / claim_urls<br/>One UPDATE ... RETURNING inside BEGIN IMMEDIATE,<br/>so the caller receives only the rows it owns.
-
-    queued --> started_crawl : mark_started writes last_crawl_time.<br/>The batch worker's whole batch in one call,<br/>V1's flush window.
-
-    started_crawl --> finished_crawl : fetch succeeded.<br/>next_crawl_time = NULL,<br/>times_crawled + 1
-
-    started_crawl --> finished_crawl : fetch failed once its retries were spent.<br/>next_crawl_time = now + 5 min, times_crawled + 1,<br/>and the message is dead-lettered.
-
-    finished_crawl --> queued : next_crawl_time has passed.<br/>With re_crawl_interval set this is the scheduled<br/>re-crawl, after a failure it is the 5 min reschedule.
-
-    started_crawl --> queued : the worker died, or the complete_crawl<br/>write itself failed. After 2 min the predicate<br/>re-selects the row.
-
-    finished_crawl --> [*] : next_crawl_time IS NULL. The predicate's finished<br/>branch tests next_crawl_time <= :now, and NULL <= now<br/>is never true, so the row is never claimed again.
-
-    note right of queued
-        Two rows are reclaimed without ever
-        being picked up again. A queued row
-        whose message was lost, or whose topic
-        was full, is eligible again once it is
-        60 minutes old. A started_crawl row is
-        eligible once it is 2 minutes old.
-        Neither transition is a state change:
-        the row is already in that state, and
-        the predicate simply selects it again.
-    end note
-
-    note right of finished_crawl
-        One state covers both outcomes.
-        complete_crawl always writes
-        finished_crawl, so what separates a
-        success from a failure is next_crawl_time:
-        NULL against a time five minutes out.
-    end note
-
-    class not_crawled insert
-    class queued claim
-    class started_crawl attempt
-    class finished_crawl terminal
-```
-
-Editable source: [`docs/url_row_state.mmd`](docs/url_row_state.mmd). Two details the diagram makes plain: a failed fetch lands in `finished_crawl` like a success does, because `complete_crawl` writes that state unconditionally and only `next_crawl_time` tells them apart; and reclaiming a lost message or a dead worker is not a state change at all, since the row is already in that state and the predicate simply selects it again once its timeout has passed.
-
 ## Low Level Design
 
 ### Layout
