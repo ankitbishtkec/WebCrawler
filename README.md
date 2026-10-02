@@ -4,6 +4,26 @@ An async, single-process web crawler. Give it one seed URL; it crawls every
 page on that exact host, keeps crawl state in SQLite, and moves work through a
 topic queue. `Ctrl+C` stops it.
 
+## Contents
+
+- [Disclosure](#disclosure)
+- [How To Run It](#how-to-run-it)
+- [Problem Statement](#problem-statement)
+- [Functional Requirements](#functional-requirements)
+- [Non-Functional Requirements](#non-functional-requirements)
+- [High Level Design](#high-level-design)
+- [Low Level Design](#low-level-design)
+  - [Layout](#layout)
+  - [Every major component](#every-major-component)
+  - [UML diagram](#uml-diagram)
+  - [Database schema](#database-schema)
+  - [`pyproject.toml`](#pyprojecttoml)
+- [Test Strategy](#test-strategy)
+- [Key Features](#key-features)
+- [Extensions and Improvement opportunities](#extensions-and-improvement-opportunities)
+  - [Extensions](#extensions)
+  - [Existing issues](#existing-issues)
+
 ## Disclosure
 - AI has been used to code it, however all the decision, code reviews, validations are owned by me. Refer [Goal.md](goal.md), [Agents.md](AGENTS.md)
 - It took around 16 focussed hours to code this.
