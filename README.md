@@ -5,8 +5,8 @@ page on that exact host, keeps crawl state in SQLite, and moves work through a
 topic queue. `Ctrl+C` stops it.
 
 ## Disclosure
-- AI has been used to code it, however all the decision, code reviews, validations are owned by me.
-- It took around 16 core hours to code this.
+- AI has been used to code it, however all the decision, code reviews, validations are owned by me. Refer [Goal.md](goal.md), [Agents.md](AGENTS.md)
+- It took around 16 focussed hours to code this.
 - The problem is very interesting and its open endedness along with extensibility make it very enjoyable.
 
 ## Problem Statement
@@ -47,6 +47,7 @@ tests, rather than in presentation.
 | NFR9 | **A module making I/O calls owns its retry: exponential backoff with jitter, and a timeout.** | Met. The store and the fetcher each hold a `RetryPolicy`. |
 | NFR10 | **Complete signatures: every function documents its arguments, its return and the exceptions a caller must handle.** | Met. On every port method, every constructor and every method that can raise. |
 | NFR12 | **Ability to handle high scale.** | Met by substitution. The infra components like queue, db etc sit behind interfaces, so the process scales by swapping them with real components Kafka, Dynamodb etc. Also the `ports` have hints to make it scalable like partitioning etc.|
+| NFR13 | **Configurability.** | Met partially. Partially as it does not have a seperate configuration class, however via (main.py)[src\webcrawler\main.py] we can configure nearly everything in this solution.|
 
 
 ## High Level Design
@@ -54,6 +55,8 @@ tests, rather than in presentation.
 ![Current crawler HLD](docs/current_crawler_HLD.png)
 
 The above design is similar to [Apache Nutch](https://medium.com/@mobomo/the-basics-working-with-nutch-e5a7d37af231) and was independently thought and chosen over the other design, the other design was similar to this however was lacking the UrlPoller(CrawlQueuer) service, the basic idea in it was to have DB to store if the url is already crawled and add urls to crawl directly into the queue. However it was dropped due to its inability to schedule url crawl in to future due to may be [Politeness Policy](src/webcrawler/ports/politeness_policy.py) and generally to avoid overloading the worker service to queue besides crawl and parse.
+
+The ability to schedule crawl later was helpful in crawling https://community.monzo.com which gets overwhelmed very quickly and starts giving 429s, in such case we schedule the url to for a crawl after 5 minutes(configurable). Also, crawling https://crawlme.monzo.com, https://monzo.com, amazon.in, flipkart and decathlon websites was also achieved.
 
 ## Low Level Design
 
