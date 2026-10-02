@@ -42,17 +42,17 @@ tests, rather than in presentation.
 | NFR3 | **Use concurrency.** | Met. `CrawlerWorker` fetches a whole batch in one `asyncio.TaskGroup`; `CrawlerWorkerV1` detaches a crawl per message and holds up to 1000(configurable) fetches in flight. Both on the one event loop. |
 | NFR4 | **Unit tests, parameterized, with good coverage.** | Partial. 97 unit tests, 40 of them parameterized cases, every collaborator mocked. Coverage is not measured yet, so it is partial. |
 | NFR5 | **Composition over inheritance, and SOLID principles.** | Met. Refer LLD section. |
-| NFR6 | **Prod readiness.** | Partial Met. Besides feature flags, metrics and dashboards; we have nearly all components in the code at the very least in a basic implementation of ports(abstract base class). All components are plug and play. |
-| NFR8 | **Async APIs wherever possible.** | Met. Nearly everything under `ports/` is `async`. |
+| NFR6 | **Prod readiness.** | Partial Met. Besides feature flags, metrics and dashboards; we have nearly all components in the code at the very least in a basic implementation of [ports](src/webcrawler/ports/)(abstract base class). All components are plug and play. |
+| NFR8 | **Async APIs wherever possible.** | Met. Nearly everything under [ports](src/webcrawler/ports/) is `async`. |
 | NFR9 | **A module making I/O calls owns its retry: exponential backoff with jitter, and a timeout.** | Met. The store and the fetcher each hold a `RetryPolicy`. |
 | NFR10 | **Complete signatures: every function documents its arguments, its return and the exceptions a caller must handle.** | Met. On every port method, every constructor and every method that can raise. |
 | NFR12 | **Ability to handle high scale.** | Met by being modular code. The infra components like queue, db etc sit behind interfaces, so the process scales by swapping them with real components Kafka, Dynamodb etc. Also the `ports` have hints to make it scalable like partitioning etc.|
-| NFR13 | **Configurability.** | Met partially. Partially as it does not have a seperate configuration class, however via (main.py)[src\webcrawler\main.py#L45-L86] we can configure nearly everything in this solution.|
+| NFR13 | **Configurability.** | Met partially. Partially as it does not have a seperate configuration class, however via [main.py](src/webcrawler/main.py#L45-L86) we can configure nearly everything in this solution.|
 
 
 ## High Level Design
 
-![Current crawler HLD](docs/current_crawler_HLD.png)
+![Current crawler HLD](docs/current_crawler_HLD.png) ([source](docs/current_crawler_HLD.png))
 
 The above design is similar to [Apache Nutch](https://medium.com/@mobomo/the-basics-working-with-nutch-e5a7d37af231) and was independently thought and chosen over the other design, the other design was similar to this however was lacking the UrlPoller(CrawlQueuer) service, the basic idea in it was to have DB to store if the url is already crawled and add urls to crawl directly into the queue. However it was dropped due to its inability to schedule url crawl in to future due to may be [Politeness Policy](src/webcrawler/ports/politeness_policy.py) and generally to avoid overloading the worker service to queue besides crawl and parse.
 
@@ -62,22 +62,22 @@ The ability to schedule crawl later was helpful in crawling https://community.mo
 
 ### Layout
 
-One process, one asyncio event loop, and seven modules that matter. `main.py` is
+One process, one asyncio event loop, and seven modules that matter. [main.py](src/webcrawler/main.py) is
 the only place that knows which implementation is in use.
 
 | Module | One-line description |
 |---|---|
-| **db** (`infrastructure/db/`) | The crawl-state store. Holds one row per URL with its state and timestamps, and owns the SQL, the transactions, and its own retry. |
-| **db poller** (`application/url_poller.py`) | Asks the store which URLs are due, marks them `queued` in one bulk statement, and feeds them to the queue. |
-| **queue** (`infrastructure/queue/`) | Holds the pending work between the poller and the worker, as a bounded buffer with a separate parking area for messages that must not be retried. |
-| **crawl worker** (`application/worker.py`) | `CrawlerWorker`, the batch consumer. Takes a batch off the queue, fetches every page in it concurrently, extracts the links, records the outcome, and commits. |
-| **V1 crawl worker** (`application/worker_v1.py`) | `CrawlerWorkerV1`, the other `CrawlWorker`. Detaches a crawl per message and commits the batch at once, so a slow page never holds new work back, and writes the store in bulk on a 10ms(configurable) timer. |
-| **orchestrator** (`application/orchestrator.py`) | Seeds the crawl once, then runs the poller and the worker together and stops both when either fails. |
-| **main** (`main.py`) | The composition root. Reads the seed and the worker's choice, constructs every object with its concrete class, runs the orchestrator, and releases everything on the way out. |
+| **db** ([infrastructure/db/](src/webcrawler/infrastructure/db/)) | The crawl-state store. Holds one row per URL with its state and timestamps, and owns the SQL, the transactions, and its own retry. |
+| **db poller** ([application/url_poller.py](src/webcrawler/application/url_poller.py)) | Asks the store which URLs are due, marks them `queued` in one bulk statement, and feeds them to the queue. |
+| **queue** ([infrastructure/queue/](src/webcrawler/infrastructure/queue/)) | Holds the pending work between the poller and the worker, as a bounded buffer with a separate parking area for messages that must not be retried. |
+| **crawl worker** ([application/worker.py](src/webcrawler/application/worker.py)) | `CrawlerWorker`, the batch consumer. Takes a batch off the queue, fetches every page in it concurrently, extracts the links, records the outcome, and commits. |
+| **V1 crawl worker** ([application/worker_v1.py](src/webcrawler/application/worker_v1.py)) | `CrawlerWorkerV1`, the other `CrawlWorker`. Detaches a crawl per message and commits the batch at once, so a slow page never holds new work back, and writes the store in bulk on a 10ms(configurable) timer. |
+| **orchestrator** ([application/orchestrator.py](src/webcrawler/application/orchestrator.py)) | Seeds the crawl once, then runs the poller and the worker together and stops both when either fails. |
+| **main** ([main.py](src/webcrawler/main.py)) | The composition root. Reads the seed and the worker's choice, constructs every object with its concrete class, runs the orchestrator, and releases everything on the way out. |
 
 
 ### Every major component
-Refer each code file's comments for details. A summary is as:
+Refer each code file's comments for details. The tree below is under [src/webcrawler/](src/webcrawler/); the entry points are [main.py](src/webcrawler/main.py), [application/orchestrator.py](src/webcrawler/application/orchestrator.py), [application/url_poller.py](src/webcrawler/application/url_poller.py), [application/worker.py](src/webcrawler/application/worker.py) and [application/worker_v1.py](src/webcrawler/application/worker_v1.py). A summary is as:
 
 ```
 src/webcrawler/
@@ -119,7 +119,7 @@ domain(aka models)  <-  ports(aka interfaces)
                                                                +-->  utils
 ```
 
-### Class diagram
+### UML diagram
 
 UML diagram for the code via mermaid format. Please use apt renderer for mermaid format to view it. paste the block [`docs/uml.mmd`](docs/uml.mmd) into https://mermaid.live.
 
@@ -127,9 +127,9 @@ UML diagram for the code via mermaid format. Please use apt renderer for mermaid
 
 Please refer HLD diagram
 
-DDL and DML commands `src/webcrawler/infrastructure/db/models.py`
+DDL and DML commands in [src/webcrawler/infrastructure/db/models.py](src/webcrawler/infrastructure/db/models.py)
 
-### `pyproject.toml`
+### [`pyproject.toml`](pyproject.toml)
 
 The single project file; there is no `setup.py`, `requirements.txt`, or
 lockfile.
