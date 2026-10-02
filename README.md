@@ -660,10 +660,6 @@ For manual E2E test, refer the [How To Run It](#how-to-run-it) section above.
 
 ## Key Features
 
-What each part of the crawler is, and what it buys you. What each one costs you
-is a separate question, answered honestly in
-[`docs/extensions.md`](docs/extensions.md).
-
 1. **Normalisation of URL** — `HTTPS://Example.com/a#top`, `https://example.com/a` and `http://example.com:80/a` are all stored as the same row, so one page is never crawled twice. And because scope is host equality, `notcrawlme.monzo.com` is skipped even though its name ends with `crawlme.monzo.com`.
 2. **The database hands each transaction an exclusive set of URLs** — Competing pollers and workers cannot claim the same URL, so running more consumers needs no coordination layer.
 3. **A stuck row is recovered by its timeout** — A row is marked `queued` or `started_crawl` before the work is picked up. If the process crashes before the next step, the row keeps that marking, and once it is older than its timeout the crawler picks it up again, so nothing stays stuck.
