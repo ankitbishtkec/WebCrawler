@@ -606,151 +606,65 @@ The choices that are not obvious from the code, each with what it cost.
 
 ## How To Run It
 
-Assumes a fresh Mac with the source only, and no Python packages installed.
-
-**1. Check the Python version.** The floor is 3.11; a stock macOS `python3` is
-often older.
-
-```bash
-python3 --version
-```
-
-If it reports less than 3.11, install a current one with Homebrew and use
-`python3.12` (or newer) in the next step instead of `python3`:
-
-```bash
-brew install python@3.12
-```
-
-**2. Create a virtual environment and install the project.**
+Assumes a fresh Mac, source only, no Python packages installed. Python 3.11 is
+the floor and a stock macOS `python3` is often older; if `python3 --version`
+says less, `brew install python@3.12` and use `python3.12` below.
 
 ```bash
 cd /path/to/WebCrawler
-
-python3 -m venv .venv
-source .venv/bin/activate
-
+python3 -m venv .venv && source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
-Invoke the environment's `python` explicitly from here on. A plain `python`
-outside the venv has neither `aiohttp` nor `aiosqlite`.
-
-**3. Run it.**
+**Run it.** It prompts for a seed URL and then for a worker; both defaults are
+fine, and it explains each choice as it asks.
 
 ```bash
-python -m webcrawler.main
+python -m webcrawler.main           # add --debug for DEBUG logging
 ```
 
-It prints a prompt and waits for one seed URL:
-
-```
-seed url>
-```
-
-Type any URL and press Enter, for example `https://crawlme.monzo.com/index.html`.
-Press Enter on an empty line to use the built-in default,
-`https://crawlme.monzo.com`. There is no way to change the seed once the crawl
-starts.
-
-Next it asks which worker to use, the same prompt every run:
-
-```
-worker> Pick the worker: 1 = CrawlerWorker, which waits for each batch to finish. 2 = CrawlerWorkerV1, which keeps fetching while earlier pages are still in flight, up to 1000 at a time. Press Enter for CrawlerWorkerV1.
-```
-
-Press Enter for `CrawlerWorkerV1`, the default, or type `1` for the batch worker.
-They also differ in when they write: `CrawlerWorker` writes once per finished
-batch, while `CrawlerWorkerV1` writes every 10ms whatever is buffered, and it
-looks at the queue every 10ms rather than once a second. On the demo site,
-`CrawlerWorkerV1` crawled 18381 pages where `CrawlerWorker` crawled 4856 in the
-same 35s, because a fast site spends most of its time waiting for links it has
-already found to become crawlable, and 10ms of window is nearly no wait. On a
-local site with 150ms responses and a 6-second stall every twentieth page the
-gap is far wider: in one 45s run `CrawlerWorkerV1` finished all 4000 pages,
-where `CrawlerWorker` finished 371 and left 3257 rows claimed and waiting behind
-the slow pages. That is why `CrawlerWorkerV1` is the default: it won both, and
-the batch worker is kept for a caller that wants one batch's outcome in one
-transaction.
-
-Both settings of `CrawlerWorkerV1` are aggressive, and 1000 fetches against one
-host can outrun it: on that same local site 70 of the 4000 URLs exhausted the
-12s fetch timeout in one run, so those pages were rescheduled and their messages
-dead-lettered. Pass a lower `max_concurrent_fetches`, and a longer
-`flush_interval_seconds`, for a gentler crawl.
-
-Add `--debug` for `DEBUG` logging instead of `INFO`:
-
-```bash
-python -m webcrawler.main --debug
-```
-
-Watch it work, every visited page and its links are logged:
+It logs every visited page and its links, from `worker` or `worker_v1`
+depending on your choice:
 
 ```
 2026-09-29 21:14:34 INFO webcrawler.application.worker: visited https://crawlme.monzo.com/index.html, found 10 link(s): [...]
 ```
 
-With worker `2` the same line comes from `webcrawler.application.worker_v1`.
+`Ctrl+C` stops it and closes the database and session.
 
-Press `Ctrl+C` to stop. It exits cleanly and closes the database and session.
-
-**4. Verify the crawl actually worked.** The state lives in `webcrawler.db` in
-the project directory. `sqlite-utils` is only needed for this step:
+**Verify the crawl worked.** State lives in `webcrawler.db`. `sqlite-utils` is
+needed only for this step: `python -m pip install sqlite-utils`.
 
 ```bash
-python -m pip install sqlite-utils
-```
-
-Rows per state, with the oldest and newest timestamps and the crawl counter:
-
-```bash
+# rows per state, with timestamps and the crawl counter
 python -m sqlite_utils query webcrawler.db "select state, count(*) as n, min(times_crawled) as min_crawled, max(times_crawled) as max_crawled, min(last_crawl_time) as first_crawl, max(last_crawl_time) as last_crawl from urls group by state" --table
-```
 
-A finished crawl of the default site ends with every row in `finished_crawl` and
-`max_crawled` of `1`. If `queued` or `started_crawl` still hold rows, work was
-in flight when you stopped, and those rows are reclaimed by the timeouts on the
-next run.
-
-Any URL crawled more than once should return **no rows**, that is the dedupe
-invariant:
-
-```bash
+# the dedupe invariant: must return no rows
 python -m sqlite_utils query webcrawler.db "select custom_url, times_crawled from urls where times_crawled > 1" --table
-```
 
-And a random sample of what was stored:
-
-```bash
+# a sample of what was stored
 python -m sqlite_utils query webcrawler.db "select custom_url, state, times_crawled, last_status_update_time from urls order by random() limit 5" --table
-```
 
-The database is also consistent after an abrupt stop:
-
-```bash
+# consistent even after an abrupt stop
 python -m sqlite_utils query webcrawler.db "pragma integrity_check" --table
 ```
 
-**5. Run the tests.**
+A finished crawl of the default site ends with every row `finished_crawl` and
+`max_crawled` of `1`. Rows left in `queued` or `started_crawl` were in flight
+when you stopped; the timeouts reclaim them on the next run.
+
+**Tests, then clean up.**
 
 ```bash
 python -m pytest
-```
 
-**6. Clean up.** Stop the crawler first if it is still running, then remove the
-generated database. Nothing else is written to the project directory.
-
-```bash
-# If a crawler is still running and holding the file, Ctrl+C in its terminal
-# is enough. To find a detached one instead:
-lsof webcrawler.db                    # prints the PID holding the file
-
+# Ctrl+C the crawler first; lsof webcrawler.db finds a detached one holding the file
 rm -f webcrawler.db
-
-deactivate                            # leave the virtual environment
+deactivate
 ```
+
+Nothing else is written to the project directory besides webcrawler.db.
 
 ## Key Features
 
