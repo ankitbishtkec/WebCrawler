@@ -9,22 +9,6 @@ topic queue. `Ctrl+C` stops it.
 - It took around 16 focussed hours to code this.
 - The problem is very interesting and its open endedness along with extensibility make it very enjoyable.
 
-## Problem Statement
-
-Given a starting URL, visit every URL found on the same domain and print each
-visited URL together with the links found on that page.
-
-The crawl is limited to **one subdomain**: seeded from
-`https://crawlme.monzo.com/` it follows `crawlme.monzo.com` links, but never
-`monzo.com`, `community.monzo.com`, or `facebook.com`.
-
-The crawler must be our own implementation. Crawling frameworks such as Scrapy
-or go-colly are out of scope because they hide the crawling behind someone
-else's code; using a library for HTML parsing is fine. It should be written the
-way a production service would be, since the interest is in the design, the
-structure, the trade-offs, the observable behaviour, the concurrency, and the
-tests, rather than in presentation.
-
 ## How To Run It
 
 Assumes a fresh Mac, source only, no Python packages installed. Python 3.11 is
@@ -88,6 +72,22 @@ deactivate
 ```bash
 python -m pytest
 ```
+
+## Problem Statement
+
+Given a starting URL, visit every URL found on the same domain and print each
+visited URL together with the links found on that page.
+
+The crawl is limited to **one subdomain**: seeded from
+`https://crawlme.monzo.com/` it follows `crawlme.monzo.com` links, but never
+`monzo.com`, `community.monzo.com`, or `facebook.com`.
+
+The crawler must be our own implementation. Crawling frameworks such as Scrapy
+or go-colly are out of scope because they hide the crawling behind someone
+else's code; using a library for HTML parsing is fine. It should be written the
+way a production service would be, since the interest is in the design, the
+structure, the trade-offs, the observable behaviour, the concurrency, and the
+tests, rather than in presentation.
 
 ## Functional Requirements
 
