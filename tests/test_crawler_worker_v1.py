@@ -3,7 +3,7 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
@@ -389,3 +389,128 @@ async def test_the_second_fetch_waits_for_the_first_when_one_slot_is_configured(
 
     assert built.fetcher.fetch.await_count == 2
     assert most_in_flight == 1
+
+
+# The failures a single URL's crawl can hit that are not a failed fetch. A
+# detached task has no task group to contain a raise, so each of these is the
+# reason the one handler around the crawl exists.
+_STEP_FAILURES = [
+    pytest.param("before_fetch", id="before_fetch raises"),
+    pytest.param("extract", id="the extractor raises"),
+    pytest.param("record_fetch", id="record_fetch raises"),
+]
+
+
+@pytest.mark.parametrize("_step", _STEP_FAILURES)
+@pytest.mark.parametrize("count", [1, 3])
+async def test_a_failure_outside_the_fetch_still_records_and_parks(
+    count: int, _step: str
+) -> None:
+    """A detached crawl that raises leaves the row due again and the message parked."""
+    built = _build_worker(count)
+    error = RuntimeError("the step failed")
+    if _step == "before_fetch":
+        built.politeness.before_fetch.side_effect = error
+    elif _step == "extract":
+        built.extractor.extract.side_effect = error
+    else:
+        built.politeness.record_fetch.side_effect = error
+
+    await _crawl_all(built)
+    await built.worker._flush()
+
+    recorded = built.repository.complete_crawl.await_args.args[0]
+    assert recorded == {url: NOW + RESCHEDULE for url in built.urls}
+    assert built.producer.enqueue_to_deadletter.call_args_list == [
+        call(message) for message in built.batch
+    ]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        pytest.param("parked", id="the message was parked"),
+        pytest.param("full", id="the deadletter queue is full"),
+    ],
+)
+async def test_a_full_deadletter_queue_is_reported_for_the_detached_crawl(
+    outcome: str,
+) -> None:
+    """A refusal is logged, and the row is still recorded as due again."""
+    built = _build_worker(1)
+    built.fetcher.fetch.side_effect = RuntimeError("the host closed the connection")
+    built.producer.enqueue_to_deadletter.return_value = outcome == "parked"
+
+    await _crawl_all(built)
+    await built.worker._flush()
+
+    recorded = built.repository.complete_crawl.await_args.args[0]
+    assert recorded == {built.urls[0]: NOW + RESCHEDULE}
+
+
+@pytest.mark.parametrize(
+    ("empty_reads", "expected_peeks"),
+    [(1, 2), (2, 3), (3, 4)],
+)
+async def test_the_consume_loop_sleeps_on_an_empty_queue_and_reads_again(
+    empty_reads: int, expected_peeks: int
+) -> None:
+    """An empty peek is a sleep, so the poller is not starved and the loop lives."""
+    built = _build_worker(1)
+    built.worker._idle_sleep_seconds = 0
+    built.reader.peek = AsyncMock(
+        side_effect=[[] for _ in range(empty_reads)] + [asyncio.CancelledError()]
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await built.worker._consume_forever()
+
+    assert built.reader.peek.await_count == expected_peeks
+
+
+async def test_the_consume_loop_commits_a_batch_and_reads_again() -> None:
+    """One full iteration: peek, detach a crawl per message, commit, read again."""
+    built = _build_worker(2)
+    built.worker._idle_sleep_seconds = 0
+    built.reader.peek = AsyncMock(side_effect=[built.batch, asyncio.CancelledError()])
+
+    with pytest.raises(asyncio.CancelledError):
+        await built.worker._consume_forever()
+    await _drain(built)
+
+    built.reader.commit.assert_awaited_once_with(built.batch)
+    assert built.fetcher.fetch.await_count == 2
+
+
+@pytest.mark.parametrize("windows", [1, 2, 3])
+async def test_the_flush_loop_writes_once_per_interval(windows: int) -> None:
+    """The loop is what makes the writes periodic; each tick flushes the buffers."""
+    built = _build_worker(1)
+    await _crawl_all(built)
+
+    task = asyncio.create_task(built.worker._flush_forever())
+    # Poll rather than sleep the interval, so the test does not race the timer.
+    for _ in range(windows):
+        while built.repository.complete_crawl.await_count < 1:
+            await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert built.repository.complete_crawl.await_count >= 1
+
+
+@pytest.mark.parametrize("fails_on_peek", [1, 2, 3])
+async def test_a_failed_worker_task_ends_the_whole_worker(fails_on_peek: int) -> None:
+    """The group takes both loops down, so nothing is left half running."""
+    built = _build_worker(1)
+    built.worker._idle_sleep_seconds = 0
+    built.reader.peek = AsyncMock(
+        side_effect=[[]] * (fails_on_peek - 1) + [RuntimeError("the queue is gone")]
+    )
+
+    with pytest.raises(BaseExceptionGroup) as group:
+        await built.worker.run()
+    # The group's own message names the crawl, and the sub-exception is the real
+    # cause the consume loop raised.
+    assert isinstance(group.value.exceptions[0], RuntimeError)

@@ -1,0 +1,60 @@
+$ python -m pytest --cov=src
+........................................................................ [ 48%]
+........................................................................ [ 96%]
+......                                                                   [100%]
+=============================== tests coverage ================================
+_______________ coverage: platform win32, python 3.14.6-final-0 _______________
+
+Name                                                                                   Stmts   Miss  Cover
+----------------------------------------------------------------------------------------------------------
+src\webcrawler\__init__.py                                                                 0      0   100%
+src\webcrawler\application\__init__.py                                                     0      0   100%
+src\webcrawler\application\orchestrator.py                                                35      0   100%
+src\webcrawler\application\url_poller.py                                                  40      3    92%
+src\webcrawler\application\worker.py                                                     104      0   100%
+src\webcrawler\application\worker_v1.py                                                  129      0   100%
+src\webcrawler\domain\__init__.py                                                          0      0   100%
+src\webcrawler\domain\base_result.py                                                       3      0   100%
+src\webcrawler\domain\crawl_state.py                                                       6      0   100%
+src\webcrawler\domain\custom_url.py                                                       51      0   100%
+src\webcrawler\domain\errors.py                                                           10      0   100%
+src\webcrawler\domain\messages.py                                                          5      0   100%
+src\webcrawler\domain\retry_settings.py                                                    3      0   100%
+src\webcrawler\infrastructure\__init__.py                                                  0      0   100%
+src\webcrawler\infrastructure\db\__init__.py                                               0      0   100%
+src\webcrawler\infrastructure\db\models.py                                                48      4    92%
+src\webcrawler\infrastructure\db\sqlite_url_state_repository.py                          165     25    85%
+src\webcrawler\infrastructure\fetch\__init__.py                                            0      0   100%
+src\webcrawler\infrastructure\fetch\aiohttp_web_page_fetcher.py                           58      1    98%
+src\webcrawler\infrastructure\fetch\headers_middleware.py                                  9      0   100%
+src\webcrawler\infrastructure\html\__init__.py                                             0      0   100%
+src\webcrawler\infrastructure\html\html_link_extractor.py                                 28      4    86%
+src\webcrawler\infrastructure\politeness\__init__.py                                       0      0   100%
+src\webcrawler\infrastructure\politeness\no_op_politeness_policy.py                       10      0   100%
+src\webcrawler\infrastructure\queue\__init__.py                                            0      0   100%
+src\webcrawler\infrastructure\queue\in_memory_single_topic_single_partition_queue.py      27      3    89%
+src\webcrawler\infrastructure\queue\in_memory_topic_producer.py                           33      7    79%
+src\webcrawler\infrastructure\queue\in_memory_topic_reader.py                             15      0   100%
+src\webcrawler\infrastructure\retry\__init__.py                                            0      0   100%
+src\webcrawler\infrastructure\retry\exponential_backoff_retry_policy.py                   31      0   100%
+src\webcrawler\infrastructure\time\__init__.py                                             0      0   100%
+src\webcrawler\infrastructure\time\system_time_provider.py                                 5      5     0%
+src\webcrawler\main.py                                                                    73     73     0%
+src\webcrawler\ports\__init__.py                                                           0      0   100%
+src\webcrawler\ports\crawl_queuer.py                                                      10      0   100%
+src\webcrawler\ports\crawl_worker.py                                                       6      0   100%
+src\webcrawler\ports\link_extractor.py                                                     5      0   100%
+src\webcrawler\ports\politeness_policy.py                                                  9      0   100%
+src\webcrawler\ports\request_middleware.py                                                 5      0   100%
+src\webcrawler\ports\retry_policy.py                                                       7      0   100%
+src\webcrawler\ports\time_provider.py                                                      5      0   100%
+src\webcrawler\ports\topic_producer.py                                                     9      0   100%
+src\webcrawler\ports\topic_reader.py                                                       7      0   100%
+src\webcrawler\ports\url_state_repository.py                                              20      0   100%
+src\webcrawler\ports\web_page_fetcher.py                                                   7      0   100%
+src\webcrawler\utils\__init__.py                                                           0      0   100%
+src\webcrawler\utils\html_parser.py                                                       19      1    95%
+src\webcrawler\utils\logger.py                                                            18     18     0%
+----------------------------------------------------------------------------------------------------------
+TOTAL                                                                                   1015    144    86%
+150 passed in 2.02s

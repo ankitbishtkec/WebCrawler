@@ -1,8 +1,9 @@
 """Unit tests for `CrawlerWorker`, the consumer half of the crawl loop."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
-from unittest.mock import MagicMock, call
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
@@ -239,3 +240,155 @@ async def test_a_deferred_url_is_not_fetched_and_is_due_after_its_wait() -> None
     built.producer.enqueue_to_deadletter.assert_not_awaited()
     built.reader.commit.assert_awaited_once_with(built.batch)
 
+
+
+# The failures a single URL's crawl can hit that are not a failed fetch. Each is
+# raised from the collaborator the step names, so the one handler around the
+# crawl has a reason to exist for every step it wraps.
+_STEP_FAILURES = [
+    pytest.param(
+        "extractor", RuntimeError("the body was not html"), id="extractor raises"
+    ),
+    pytest.param(
+        "politeness", RuntimeError("the policy is unreachable"), id="before_fetch raises"
+    ),
+    pytest.param(
+        "politeness_after",
+        RuntimeError("the policy refused the result"),
+        id="record_fetch raises",
+    ),
+]
+
+
+@pytest.mark.parametrize("_step, _error", _STEP_FAILURES)
+@pytest.mark.parametrize("count", [1, 3])
+async def test_a_failure_outside_the_fetch_leaves_every_url_due_again(
+    count: int, _step: str, _error: RuntimeError
+) -> None:
+    """Whatever step raises, the batch survives and the URL is rescheduled."""
+    built = _build_worker(count)
+    if _step == "extractor":
+        built.extractor.extract.side_effect = _error
+    elif _step == "politeness":
+        built.politeness.before_fetch.side_effect = _error
+    else:
+        built.politeness.record_fetch.side_effect = _error
+
+    await built.worker._process_batch(built.batch)
+
+    recorded = built.repository.complete_crawl.await_args.args[0]
+    assert recorded == {url: NOW + RESCHEDULE for url in built.urls}
+    # Every message is parked and the queue still moves on.
+    assert built.producer.enqueue_to_deadletter.call_args_list == [
+        call(message) for message in built.batch
+    ]
+    built.reader.commit.assert_awaited_once_with(built.batch)
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        pytest.param("parked", id="the message was parked"),
+        pytest.param("full", id="the deadletter queue is full"),
+        pytest.param("raises", id="the producer raised"),
+    ],
+)
+async def test_a_deadletter_outcome_never_stops_the_batch_committing(
+    outcome: str,
+) -> None:
+    """Parked, refused or raised, the batch is committed either way."""
+    built = _build_worker(1)
+    built.fetcher.fetch.side_effect = RuntimeError("the host closed the connection")
+    if outcome == "parked":
+        built.producer.enqueue_to_deadletter.return_value = True
+    elif outcome == "full":
+        built.producer.enqueue_to_deadletter.return_value = False
+    else:
+        built.producer.enqueue_to_deadletter.side_effect = RuntimeError(
+            "the deadletter queue is gone"
+        )
+
+    await built.worker._process_batch(built.batch)
+
+    built.reader.commit.assert_awaited_once_with(built.batch)
+
+
+@pytest.mark.parametrize("count", [1, 3])
+async def test_close_releases_the_fetcher_the_worker_owns(count: int) -> None:
+    """`close` hands the pooled session back, once, and only what it owns."""
+    built = _build_worker(count)
+    built.worker._idle_sleep_seconds = 0
+    built.fetcher.close = AsyncMock()
+
+    await built.worker.close()
+
+    built.fetcher.close.assert_awaited_once()
+    built.repository.close.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("empty_reads", "expected_peeks"),
+    [
+        (1, 2),
+        (2, 3),
+        (3, 4),
+    ],
+)
+async def test_run_sleeps_on_an_empty_queue_and_reads_again(
+    empty_reads: int, expected_peeks: int
+) -> None:
+    """An empty peek is a sleep, so the poller is not starved and the loop lives."""
+    built = _build_worker(1)
+    built.worker._idle_sleep_seconds = 0
+    built.reader.peek = AsyncMock(
+        side_effect=[[] for _ in range(empty_reads)] + [asyncio.CancelledError()]
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await built.worker.run()
+
+    assert built.reader.peek.await_count == expected_peeks
+
+
+async def test_run_processes_a_batch_and_keeps_reading() -> None:
+    """One full iteration: peek, crawl, record, commit, then read again."""
+    built = _build_worker(1)
+    built.worker._idle_sleep_seconds = 0
+    built.reader.peek = AsyncMock(
+        side_effect=[built.batch, asyncio.CancelledError()]
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await built.worker.run()
+
+    built.repository.complete_crawl.assert_awaited_once()
+    built.reader.commit.assert_awaited_once_with(built.batch)
+
+
+@pytest.mark.parametrize(
+    ("waits", "fetch_fails", "expected"),
+    [
+        # Deferred first, then failed: the later real instant wins.
+        pytest.param([DEFER_MS, 0], True, NOW + RESCHEDULE, id="defer then fail"),
+        # Failed first, then deferred: the earlier instant does not displace it.
+        pytest.param([0, DEFER_MS], True, NOW + RESCHEDULE, id="fail then defer"),
+        # Both deferred to the same instant: the first one stands.
+        pytest.param([DEFER_MS, DEFER_MS], False, NOW + timedelta(milliseconds=DEFER_MS),
+                     id="defer twice"),
+    ],
+)
+async def test_one_url_appearing_twice_keeps_the_later_of_two_real_instants(
+    waits: list[int], fetch_fails: bool, expected: datetime
+) -> None:
+    """Two outcomes for one URL collapse, and a `None` never displaces an instant."""
+    built = _build_worker(1)
+    url = built.urls[0]
+    built = built._replace(batch=[BaseMessage(url, 1), BaseMessage(url, 1)])
+    built.politeness.before_fetch.side_effect = waits
+    if fetch_fails:
+        built.fetcher.fetch.side_effect = RuntimeError("down")
+
+    await built.worker._process_batch(built.batch)
+
+    recorded = built.repository.complete_crawl.await_args.args[0]
+    assert recorded == {url: expected}

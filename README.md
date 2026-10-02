@@ -70,8 +70,12 @@ deactivate
 **Tests**
 
 ```bash
-python -m pytest
+python -m pip install pytest-cov    # only for the coverage run below
+python -m pytest                    # the suite
+python -m pytest --cov=src          # the suite with coverage
 ```
+
+The coverage run prints a per-module table and a total. The committed output is in [`docs/coverage_report.txt`](docs/coverage_report.txt).
 
 ## Problem Statement
 
@@ -104,7 +108,7 @@ tests, rather than in presentation.
 | NFR1 | **Own implementation, no crawling framework.** | Met. No crawling framework is used. |
 | NFR2 | **Written as production code.** | Met. The subsequent sections on HLD and LLD can validate this|
 | NFR3 | **Use concurrency.** | Met. `CrawlerWorker` fetches a whole batch in one `asyncio.TaskGroup`; `CrawlerWorkerV1` detaches a crawl per message and holds up to 1000(configurable) fetches in flight. Both on the one event loop. |
-| NFR4 | **Unit tests, parameterized, with good coverage.** | Partial. 97 unit tests, 40 of them parameterized cases, every collaborator mocked. Coverage is not measured yet, so it is partial. |
+| NFR4 | **Unit tests, parameterized, with good coverage.** | Met. 150 unit tests, most of them parameterized cases over fixed input/output tables, every collaborator mocked. `python -m pytest --cov=src` reports 86% over 1015 statements. |
 | NFR5 | **Composition over inheritance, and SOLID principles.** | Met. Refer LLD section. |
 | NFR6 | **Prod readiness.** | Partial Met. Besides feature flags, metrics and dashboards; we have nearly all components in the code at the very least in a basic implementation of [ports](src/webcrawler/ports/)(abstract base class). All components are plug and play. |
 | NFR8 | **Async APIs wherever possible.** | Met. Nearly everything under [ports](src/webcrawler/ports/) is `async`. |
@@ -647,7 +651,9 @@ inspection queries below, so it is installed separately.
 
 ## Test Strategy
 
-97 tests across [tests/](tests/), are nearly all mocking the dependencies when testing the unit. They test happy and unhappy path . There are no integration tests and no live HTTP: the crawl is verified by what the store returns, not by what a real server does.
+150 tests across [tests/](tests/), are nearly all mocking the dependencies when testing the unit. They test happy and unhappy path . There are no integration tests and no live HTTP: the crawl is verified by what the store returns, not by what a real server does.
+
+Coverage is measured, with `python -m pytest --cov=src`: **86%** across 1015 statements. Both workers, `CustomURL`, the retry policy and every port are at 100%. The committed run is in [`docs/coverage_report.txt`](docs/coverage_report.txt); the gaps are `main.py` and `logger.py`, neither of which is unit tested, and the small adapters whose only uncovered lines are their logging branches.
 
 For manual E2E test, refer the [How To Run It](#how-to-run-it) section above.
 
