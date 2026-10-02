@@ -47,7 +47,7 @@ tests, rather than in presentation.
 | NFR9 | **A module making I/O calls owns its retry: exponential backoff with jitter, and a timeout.** | Met. The store and the fetcher each hold a `RetryPolicy`. |
 | NFR10 | **Complete signatures: every function documents its arguments, its return and the exceptions a caller must handle.** | Met. On every port method, every constructor and every method that can raise. |
 | NFR12 | **Ability to handle high scale.** | Met by substitution. The infra components like queue, db etc sit behind interfaces, so the process scales by swapping them with real components Kafka, Dynamodb etc. Also the `ports` have hints to make it scalable like partitioning etc.|
-| NFR13 | **Configurability.** | Met partially. Partially as it does not have a seperate configuration class, however via (main.py)[src\webcrawler\main.py] we can configure nearly everything in this solution.|
+| NFR13 | **Configurability.** | Met partially. Partially as it does not have a seperate configuration class, however via (main.py)[src\webcrawler\main.py#L45-L86] we can configure nearly everything in this solution.|
 
 
 ## High Level Design

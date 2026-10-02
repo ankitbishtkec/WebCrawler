@@ -84,8 +84,8 @@ WORKER_CHOICES: dict[str, type[CrawlWorker]] = {
     "2": CrawlerWorkerV1,
 }
 DEFAULT_WORKER_CHOICE: str = "2"
-# Several sites answer 503 to a non-browser agent, so the crawler presents as
-# a normal browser.
+
+
 async def main() -> None:
     """Wire every concrete class to its port and run one seed-once crawl.
 
