@@ -45,7 +45,7 @@ needed only for this step: `python -m pip install sqlite-utils`.
 # rows per state, with timestamps and the crawl counter
 python -m sqlite_utils query webcrawler.db "select state, count(*) as n, min(times_crawled) as min_crawled, max(times_crawled) as max_crawled, min(last_crawl_time) as first_crawl, max(last_crawl_time) as last_crawl from urls group by state" --table
 
-# the dedupe invariant: must return no rows
+# the dedupe invariant: must return no rows for default seed, for https://community.monzo.com we might see more than 1 as we safeter many 429s defer re-crawl to after 5 minutes(configurable)
 python -m sqlite_utils query webcrawler.db "select custom_url, times_crawled from urls where times_crawled > 1" --table
 
 # a sample of what was stored
@@ -59,7 +59,7 @@ A finished crawl of the default site ends with every row `finished_crawl` and
 `max_crawled` of `1`. Rows left in `queued` or `started_crawl` were in flight
 when you stopped; the timeouts reclaim them on the next run.
 
-**Clean up.**
+**Clean up**
 
 ```bash
 # Ctrl+C the crawler first; lsof webcrawler.db finds a detached one holding the file
@@ -647,11 +647,10 @@ inspection queries below, so it is installed separately.
 
 ## Test Strategy
 
-<!--
-  PLACEHOLDER - to be written.
-  Cover: what is unit-tested versus integration-tested, how concurrency is (and
-  is not) tested without flakiness, and how the parameterised cases are chosen.
--->
+97 tests across [tests/](tests/), are nearly all mocking the dependencies. They have happy and unhappy path tests.. There are no integration tests and no live HTTP: the crawl is verified by what the store returns, not by what a real server does.
+
+For manual E2E test, refer the Section above "How to run"
+
 
 ## Design Decisions
 
