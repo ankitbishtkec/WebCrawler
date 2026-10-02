@@ -77,37 +77,43 @@ the only place that knows which implementation is in use.
 
 
 ### Every major component
-Refer each code file's comments for details. A summary is as:
 
-```
-src/webcrawler/
-  main.py                                  composition root: reads the seed, builds every object, runs, releases
-  application/
-    orchestrator.py                        seeds once, then runs the poller and the worker in one TaskGroup
-    url_poller.py                          CrawlQueuer: claims store rows on a timer and bulk-feeds the queue
-    worker.py                              CrawlerWorker: peek a batch, crawl it concurrently, record, commit
-    worker_v1.py                           CrawlerWorkerV1: detach a crawl per message, bulk-write on a timer
-  domain/
-    custom_url.py                          immutable canonical URL; identity is scheme+host+port+path+query
-    ...
-    retry_settings.py                      frozen backoff/jitter/timeout knobs shared by every I/O module
-  ports/
-    url_state_repository.py                store interface: create, read, claim, mark started, complete, close
-    ...
-    crawl_worker.py                        worker interface: run the consume loop, close what it owns
-  infrastructure/
-    db/                                    default store: aiosqlite, explicit transactions, owns its retry
-    fetch/                                 default fetcher: pooled session, status-to-error mapping
-    html/                                  resolves every href against its own page, keeps exact-host only
-    politeness/                            default policy: always reports 0 ms, never throttles
-    queue/                                 the two bounded deques behind both adapters
-    queue/                                 TopicProducer view over that queue
-    retry                                  default retry loop: min(base*2**n, max) + uniform(0, jitter)
-    time/                                  returns datetime.now(timezone.utc)
-  utils/
-    html_parser.py                         HTMLParser subclass collecting <a href> in document order
-    logger.py                              one UTC stream handler on the "webcrawler" logger
-```
+Four layers, each knowing only the one below it. The idea is that the middle
+two are swapped out, not rewritten: the crawl is written against abstract
+interfaces, and anything real can be dropped in behind them.
+
+**[domain/](src/webcrawler/domain/)** — the vocabulary, with no I/O at all.
+A URL is compared and stored as one immutable value ([`CustomURL`](src/webcrawler/domain/custom_url.py)),
+so two references to the same page are the same row in the database. Everything
+else here is a value or an error type: the row [states](src/webcrawler/domain/messages.py),
+the frozen [retry knobs](src/webcrawler/domain/retry_settings.py) every I/O module
+reads, and the exception that tells a retrying caller whether to try again.
+
+**[ports/](src/webcrawler/ports/)** — the contracts, each one an abstract base
+class, and the reason the system is swappable. There is a port for the store
+([`URLStateRepository`](src/webcrawler/ports/url_state_repository.py)), for the
+work queue, for fetching a page, and for the rest. They describe *what* a
+component must do and never *how*.
+
+**[infrastructure/](src/webcrawler/infrastructure/)** — the only layer that
+performs real I/O, one folder per port. The store is
+[SQLite](src/webcrawler/infrastructure/db/), the fetcher is
+[aiohttp](src/webcrawler/infrastructure/fetch/) over a pooled session, the queue
+is [in-process](src/webcrawler/infrastructure/queue/) bounded deques. Replace one
+folder and the layer above cannot tell.
+
+**[application/](src/webcrawler/application/)** — the crawl itself, and the only
+layer that sequences anything. The poller asks the store what is due and feeds
+the queue; the worker drains the queue and fetches. Two worker implementations
+exist because it is the one decision worth arguing about: the batch
+[worker](src/webcrawler/application/worker.py) waits for each batch before it
+writes anything, the [non-blocking](src/webcrawler/application/worker_v1.py) one
+never lets a slow page hold up the rest. Both satisfy the same
+[port](src/webcrawler/ports/crawl_worker.py).
+
+**[main.py](src/webcrawler/main.py)** — the composition root. It is the only file
+that names a concrete class, which is what lets everything else stay behind an
+interface.
 
 Dependency direction, one way only:
 
