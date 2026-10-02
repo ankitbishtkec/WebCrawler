@@ -8,6 +8,11 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
+# The coverage data file; the committed report is docs/coverage_report.txt
+.coverage
+.coverage.*
+htmlcov/
+
 # Crawl output: the SQLite state store and any page bodies
 *.db
 *.db-journal
