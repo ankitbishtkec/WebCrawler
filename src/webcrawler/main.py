@@ -1,7 +1,7 @@
 """The composition root: the one module that names concrete classes.
 
 Every other module sees a port, so this is where the concrete classes are
-chosen and connected: one queue behind both queue views, one retry policy
+chosen and connected: one queue behind both queue views, one retry policy each
 for the store and the fetches, one politeness policy that never waits, and the
 operator's choice between the two `CrawlWorker` implementations.
 """

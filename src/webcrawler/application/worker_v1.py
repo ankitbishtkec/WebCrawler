@@ -53,9 +53,10 @@ class CrawlerWorkerV1(CrawlWorker):
     and then makes them in bulk.
 
     `run` returns only on cancellation, since a crawl ends when the operator
-    interrupts it, and `close` writes whatever the detached crawls left in the
-    buffers. A flush that fails drops its snapshot, and the rows it held are
-    reclaimed by `job_timeout` rather than being written twice.
+    interrupts it, and `close` flushes what reached the buffers before it
+    returns, without waiting for the crawls still detached. A flush that fails
+    drops its snapshot, and the rows it held are reclaimed by `job_timeout`
+    rather than being written twice.
     """
 
     def __init__(
@@ -72,8 +73,6 @@ class CrawlerWorkerV1(CrawlWorker):
         # 10ms, where `CrawlerWorker` waits a second: this worker empties its
         # queue as fast as it fills it, and a long sleep here is the price of
         # that, since a message that arrives during the sleep waits for it.
-        # long sleep becomes a penalty for its eagerly crawling pages. We wanted
-        # it to be not a penalty so reduced it.
         idle_sleep_seconds: float = 0.01,
         reschedule_delay: timedelta = timedelta(minutes=1),
         re_crawl_interval: timedelta | None = None,
@@ -269,8 +268,8 @@ class CrawlerWorkerV1(CrawlWorker):
     def _mark_started(self, url: CustomURL) -> None:
         """Buffer one started URL; the flush loop writes them in one call.
 
-        The attempt time is the flush's own instant, since a window is half a
-        second long and a row marked a little late still times out correctly.
+        The attempt time is the flush's own instant, since a window is short and
+        a row marked a little late still times out correctly.
 
         Args:
         url: The URL whose attempt begins, already held by the store.

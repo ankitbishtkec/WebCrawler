@@ -675,41 +675,29 @@ For manual E2E test, refer the [How To Run It](#how-to-run-it) section above.
 13. **Indexes on the database for faster queries** — Composite indexes over the state and time columns keep the query that picks the next URLs to crawl fast as the row count grows.
 
 
-## Opportunities
+## Extensions and Improvement opportunities
 
-Product and architecture extensions, in rough order of value.
+Two lists: the areas the crawler should grow into, and the defects it has today.
 
-- **Persist page bodies.** The body is parsed for its links and discarded. A
-  `PageStore` port with a file-backed implementation, plus one call in the
-  worker's per-URL path, would make the crawl a collector rather than only an
-  indexer.
-- **A real partitioned broker.** `TopicProducer` and `TopicReader` already
-  carry `topic`, `consumer_group_id`, and `partition_key` and ignore them.
-  Kafka, or anything else partitioned, means two new adapters: a producer that
-  routes on the partition key, and a reader that reports its assignment. A
-  consumer group and rebalancing appear there and are needed the moment there
-  is more than one worker.
-- **More than one worker.** Everything is a single consumer today. Scaling out
-  means several workers sharing the queue, which needs the partition key to be
-  honoured so two workers cannot claim the same URL, the store's claim already
-  makes that safe, but the queue has to support it.
-- **Auth and metadata middlewares.** Headers already flow through
-  `RequestMiddleware`; an auth middleware is the same shape and mutates the
-  header dict in place. A token that must be refreshed is a different shape,
-  because it performs I/O and the port's `apply` would have to become `async`.
-- **A real politeness policy.** The shipped policy reports `0` and never
-  throttles. Per-host rate limiting, or a per-domain concurrency cap, is the
-  same interface, and the worker needs no change to honour it.
-- **Crawl directives.** `robots.txt` and `sitemap.xml` would both narrow or
-  widen what is fetched. `robots.txt` in particular belongs on the fetch path
-  with a cached per-host decision, not inside the extractor.
-- **Content-type aware extraction.** The extractor reads every body as HTML. A
-  PDF, an image, or a JSON endpoint is fetched, parsed as markup, and yields
-  nothing, deciding by `Content-Type` before extraction would avoid the work
-  and record a terminal result instead.
-- **Scheduling policy.** A finished URL is terminal unless a re-crawl interval
-  is set, and then every URL shares one interval. Per-URL importance, or
-  recency-weighted selection, belongs in the predicate's ordering.
-- **Graceful drain on shutdown.** `Ctrl+C` stops promptly and the rows stay
-  recoverable through the timeouts. Draining the in-flight batch before exit
-  would turn a recovery into a clean finish.
+### Extensions
+
+1. **A politeness policy that protects the site being crawled** — Nothing slows the crawler down today, so it can hit one host far harder than that host would like. A policy that paces requests per host and honours `robots.txt` would make it safe to point at a real site.
+2. **Crawling sites that block bots** — Some sites answer 403 to every single page for a plain HTTP client, leetcode and ndtv.com among them, so those sites cannot be crawled at all today. This is an area the crawler cannot reach without more work.
+3. **Metrics, a dashboard and alerts** — Logs and metrics answer different questions, and today only logs exist. Counters for crawled, queued and failed URLs with a dashboard, plus an alert when progress stops, would let an unattended run be watched instead of guessed at.
+4. **A configuration manager** — The code is already configurable through its constants, but every one of them is a module-level value. A configuration manager would let those be set from outside the source.
+5. **Integration and end-to-end tests** — The current tests use a fake for every part, so they cannot catch a mistake where those parts disagree with each other. A test that runs the real store, poller and worker together would give more confidence.
+6. **Auth middleware** — Some sites only serve pages to a logged-in client, and the crawler cannot reach them at all today. A middleware that supplies credentials is the missing piece.
+7. **Crawl directives** — `sitemap.xml` is never read, so discovery only ever follows links found on pages. Reading it would widen coverage of a site that publishes one.
+8. **Content-type aware extraction** — Every body is parsed as HTML, so a PDF or a JSON endpoint is fetched, parsed as markup and yields nothing. Deciding by `Content-Type` before extraction would skip the work and record a terminal result instead.
+9. **Sharding the candidate query across pollers** — The claim has no partition predicate, so on a partitioned store every poller's sweep touches every partition, and running many pollers multiplies that fan-out and the lock contention between them. Giving each poller an exclusive set of partitions would cut the load.
+
+### Existing issues
+
+1. **One IPv6 link stalls the entire crawler** — `urlsplit` strips IPv6 brackets and `get_url()` never puts them back, so `http://[::1]:8080/a` is stored as a key that cannot re-parse, and that one row aborts every claim transaction. Re-add the brackets when the host contains `:`.
+2. **The default worker can crawl the same URL twice** — a row is marked started *before* it waits for a fetch slot, so a backlog deeper than `job_timeout` worth of waiting makes those rows look abandoned and re-claimed. Rare at the shipped 1000 concurrent fetches, and the constant is configurable, but it gets likelier as that number is lowered for a gentler crawl. Acquire the slot first, or count the wait inside the timeout.
+3. **In-flight pages are abandoned on every stop** — detached crawls are not awaited by [`CrawlerWorkerV1.close()`](src/webcrawler/application/worker_v1.py#L126), so up to a thousand URLs lose their body and wait out the timeout. Await them with a grace bound before the final flush.
+4. **A minor data inconsistency if marking a batch started fails** — the flush logs it and carries on, so the row is written as finished with a NULL attempt time. Because its state is then `finished_crawl`, not `queued` or `started_crawl`, the timeouts never pick it up again. One `return` drops the window instead.
+5. **A late write can resurrect a cancelled schedule** — the completion update has no state guard, so a stale in-flight write overwrites a newer terminal value and the URL becomes due again an hour later. Add `AND state = 'started_crawl'`, or a timestamp compare-and-set.
+6. **An off-host redirect contributes off-host links** — redirects are followed wherever the server sends them, but the body is parsed against the pre-redirect URL, so those links land under the original host's identity. Record the final response URL and re-check scope against it.
+7. **Dead URLs retry forever** — the schema has no attempt counter, so a 404 is rescheduled every cycle: an error from the fetcher, an error from the worker, a dead-letter append, and a repeat in five minutes. A crawl never reaches a steady state on any site with broken links. Add an `attempts` column with a cap, plus the last error class.
+8. **No SIGTERM handling** — `docker stop`, `systemctl stop` and every CI cancel send SIGTERM, which kills the process with no log line, no flush and no database close, unlike `Ctrl+C`. Add a signal handler that cancels the group, then re-raises so the exit code still reflects the request.

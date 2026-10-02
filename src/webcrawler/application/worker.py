@@ -97,9 +97,9 @@ class CrawlerWorker(CrawlWorker):
         stops the crawl.
         """
         self._logger.debug("worker reading the crawl queue")
-        # The reader is the only source of work, and no exception escapes this
-        # loop: a per-URL failure is one failed URL and a failed batch I/O call is
-        # one logged step, so neither can kill the worker.
+        # The reader is the only source of work, and a failure does not end the
+        # crawl: a per-URL failure is one failed URL and a failed batch I/O call
+        # is one logged step. Only the loop itself, on cancellation, stops here.
         while True:
             batch = await self._reader.peek(self._batch_size)
             if not batch:

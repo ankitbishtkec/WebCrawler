@@ -564,8 +564,12 @@ class SQLiteURLStateRepository(URLStateRepository):
                 rows = await cursor.fetchall()
             batch = {models.row_to_custom_url(row) for row in rows}
             claimed |= batch
+            # An empty chunk does not end a restricted claim: the caller's set
+            # is split into several statements, and a chunk whose URLs are none
+            # of them due must not stop the chunks after it from being claimed.
+            # The unrestricted claim is one statement, so nothing follows it.
             if not batch:
-                break
+                continue
         self._logger.debug(
             "claimed %d url(s) at %s, %d in the caller's set",
             len(claimed),
