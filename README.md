@@ -46,8 +46,8 @@ tests, rather than in presentation.
 | NFR8 | **Async APIs wherever possible.** | Met. Nearly everything under `ports/` is `async`. |
 | NFR9 | **A module making I/O calls owns its retry: exponential backoff with jitter, and a timeout.** | Met. The store and the fetcher each hold a `RetryPolicy`. |
 | NFR10 | **Complete signatures: every function documents its arguments, its return and the exceptions a caller must handle.** | Met. On every port method, every constructor and every method that can raise. |
-| NFR12 | **Ability to handle high scale.** | Met by substitution. The infra components like queue, db etc sit behind interfaces, so the process scales by swapping them with real components Kafka, Dynamodb etc. Also the `ports` have hints to make it scalable like partitioning etc.|
-| NFR13 | **Configurability.** | Met partially. Partially as it does not have a seperate configuration class, however via (main.py)[src\webcrawler\main.py] we can configure nearly everything in this solution.|
+| NFR12 | **Ability to handle high scale.** | Met by being modular code. The infra components like queue, db etc sit behind interfaces, so the process scales by swapping them with real components Kafka, Dynamodb etc. Also the `ports` have hints to make it scalable like partitioning etc.|
+| NFR13 | **Configurability.** | Met partially. Partially as it does not have a seperate configuration class, however via (main.py)[src\webcrawler\main.py#L45-L86] we can configure nearly everything in this solution.|
 
 
 ## High Level Design
@@ -71,44 +71,13 @@ the only place that knows which implementation is in use.
 | **db poller** (`application/url_poller.py`) | Asks the store which URLs are due, marks them `queued` in one bulk statement, and feeds them to the queue. |
 | **queue** (`infrastructure/queue/`) | Holds the pending work between the poller and the worker, as a bounded buffer with a separate parking area for messages that must not be retried. |
 | **crawl worker** (`application/worker.py`) | `CrawlerWorker`, the batch consumer. Takes a batch off the queue, fetches every page in it concurrently, extracts the links, records the outcome, and commits. |
-| **non-blocking crawl worker** (`application/worker_v1.py`) | `CrawlerWorkerV1`, the other `CrawlWorker`. Detaches a crawl per message and commits the batch at once, so a slow page never holds new work back, and writes the store in bulk on a 10ms timer. |
+| **V1 crawl worker** (`application/worker_v1.py`) | `CrawlerWorkerV1`, the other `CrawlWorker`. Detaches a crawl per message and commits the batch at once, so a slow page never holds new work back, and writes the store in bulk on a 10ms(configurable) timer. |
 | **orchestrator** (`application/orchestrator.py`) | Seeds the crawl once, then runs the poller and the worker together and stops both when either fails. |
 | **main** (`main.py`) | The composition root. Reads the seed and the worker's choice, constructs every object with its concrete class, runs the orchestrator, and releases everything on the way out. |
 
-Three supporting packages sit underneath those seven:
 
-| Package | One-line description |
-|---|---|
-| `domain/` | The value types every module agrees on: the canonical URL, the four crawl states, the queue message, and the error types that tell retry how to read a failure. |
-| `ports/` | The eleven interfaces. What a module needs from another module, stated without saying how it is done. |
-| `utils/` | Two helpers with no project dependency: the `<a href>` collector and the logger setup. |
-
-### Modularity and composition
-
-Two things make this replaceable rather than merely tidy.
-
-**Composition over inheritance.** Every collaborator is a constructor argument, passed in from `main.py`. A module reaches another only through the interface it was handed, never by importing a concrete class. The only classes that extend a port are `SQLiteURLStateRepository` and the two `CrawlWorker`s, and nothing extends them in turn.
-
-**The implementation is the only thing that changes.** Because `application/` imports no implementation at all, swapping one is a constructor change in `main.py`:
-
-| Instead of | Write | Application changes |
-|---|---|---|
-| the in-memory queue | a Kafka producer and reader against `TopicProducer` / `TopicReader` | None. The reader already takes `topic` and `consumer_group_id`, the producer takes `topic`, and every `BaseMessage` already carries a `partition_key`. The in-memory pair accepts all three and ignores them, so the shape is already a broker's. |
-| SQLite | a Postgres or MySQL store against `URLStateRepository` | None, though this one is real work: the claim is a single `UPDATE ... RETURNING`, which Postgres spells differently, and `sqlite3.Error` in the implementation's `Raises:` becomes a driver error. |
-| `aiohttp` | `httpx` against `WebPageFetcher` | None. Two methods, `fetch` and `close`. |
-| the no-op politeness policy | a rate-limiting one against `PolitenessPolicy` | None. The worker already asks before every fetch and never sleeps the answer. |
-| either worker | another one against `CrawlWorker` | None. The orchestrator only ever calls `run` and `close`, so a third worker is a new class and one line in `main.py`. |
-
-What does *not* survive a swap unchanged is scale. The shipped process is one
-worker reading one queue, so raising throughput means more workers, and the
-queue has to honour the partition key before two workers can share it safely.
-The store's claim is already safe for that, since a claimed row leaves the
-crawlable set.
-
-### Every file
-
-The seven modules above are the ones that matter. This is the full tree, for
-anyone reading along:
+### Every major component
+Refer each code file's comments for details. A summary is as:
 
 ```
 src/webcrawler/
@@ -120,35 +89,21 @@ src/webcrawler/
     worker_v1.py                           CrawlerWorkerV1: detach a crawl per message, bulk-write on a timer
   domain/
     custom_url.py                          immutable canonical URL; identity is scheme+host+port+path+query
-    crawl_state.py                         the four row states: not_crawled, queued, started_crawl, finished_crawl
-    messages.py                            frozen queue message, plus the queue-overflow error
-    base_result.py                         success/failure verdict handed back to a politeness policy
-    errors.py                              the two retry verdicts: non-retryable, retryable status
+    ...
     retry_settings.py                      frozen backoff/jitter/timeout knobs shared by every I/O module
   ports/
     url_state_repository.py                store interface: create, read, claim, mark started, complete, close
-    crawl_queuer.py                        queueing interface: run the poll loop, enqueue URLs, queue candidates
+    ...
     crawl_worker.py                        worker interface: run the consume loop, close what it owns
-    topic_producer.py                      queue write side: single, bulk, and dead-letter enqueue
-    topic_reader.py                        queue read side: non-reserving peek, head-based commit
-    web_page_fetcher.py                    fetch one page body and own the transport's lifetime
-    link_extractor.py                      pull the in-scope links out of a body
-    politeness_policy.py                   decide when a URL may be fetched, and learn from the outcome
-    retry_policy.py                        run one fallible operation under a deadline with backoff
-    time_provider.py                       the only source of "now"
-    request_middleware.py                  per-request header hook
   infrastructure/
-    db/sqlite_url_state_repository.py      default store: aiosqlite, explicit transactions, owns its retry
-    db/models.py                           all SQL text, the shared crawlable predicate, row mapping
-    fetch/aiohttp_web_page_fetcher.py      default fetcher: pooled session, status-to-error mapping
-    fetch/headers_middleware.py            merges the default headers into every request
-    html/html_link_extractor.py            resolves every href against its own page, keeps exact-host only
-    politeness/no_op_politeness_policy.py  default policy: always reports 0 ms, never throttles
-    queue/in_memory_single_topic_single_partition_queue.py   the two bounded deques behind both adapters
-    queue/in_memory_topic_producer.py      TopicProducer view over that queue
-    queue/in_memory_topic_reader.py        TopicReader view over that queue
-    retry/exponential_backoff_retry_policy.py  default retry loop: min(base*2**n, max) + uniform(0, jitter)
-    time/system_time_provider.py           returns datetime.now(timezone.utc)
+    db/                                    default store: aiosqlite, explicit transactions, owns its retry
+    fetch/                                 default fetcher: pooled session, status-to-error mapping
+    html/                                  resolves every href against its own page, keeps exact-host only
+    politeness/                            default policy: always reports 0 ms, never throttles
+    queue/                                 the two bounded deques behind both adapters
+    queue/                                 TopicProducer view over that queue
+    retry                                  default retry loop: min(base*2**n, max) + uniform(0, jitter)
+    time/                                  returns datetime.now(timezone.utc)
   utils/
     html_parser.py                         HTMLParser subclass collecting <a href> in document order
     logger.py                              one UTC stream handler on the "webcrawler" logger
