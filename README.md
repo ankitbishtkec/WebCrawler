@@ -683,7 +683,7 @@ For manual E2E test, refer the [How To Run It](#how-to-run-it) section above.
 1. **Normalisation of URL** — `HTTPS://Example.com/a#top`, `https://example.com/a` and `http://example.com:80/a` are all stored as the same row, so one page is never crawled twice. And because scope is host equality, `notcrawlme.monzo.com` is skipped even though its name ends with `crawlme.monzo.com`.
 2. **The database hands each transaction an exclusive set of URLs** — Competing pollers and workers cannot claim the same URL, so running more consumers needs no coordination layer.
 3. **A stuck row is recovered by its timeout** — A row is marked `queued` or `started_crawl` before the work is picked up. If the process crashes before the next step, the row keeps that marking, and once it is older than its timeout the crawler picks it up again, so nothing stays stuck.
-4. **Dedupe at the application layer** — The repository's own signature takes a set and a dict, so a URL found twice is written once without the store ever being asked to spot the duplicate.
+4. **Dedupe built into the port signatures** — Writes take a `set` or a `dict` so a repeat collapses before the store sees it, inserts use `ON CONFLICT DO NOTHING`, and every queue call carries a caller-supplied `request_id` so a retried send cannot duplicate. The shipped in-memory queue ignores that key, since it is never retried — it is the seam a networked broker would use.
 5. **Bulk writes, one statement per batch** — A whole batch of outcomes and discovered links is a single statement, so write cost does not scale with how much the crawl finds.
 6. **A retry policy that differs by the nature of the I/O** — A locked database retries in milliseconds while a 429 backs off over seconds, and neither one starves the other's attempt budget.
 7. **A configurable cap on concurrent fetches** — Pages are fetched in parallel, but the number of fetches active at any moment has a configurable ceiling, 1000 by default, so at high scale the crawler bounds its own resource use instead of exhausting the machine.
@@ -693,6 +693,7 @@ For manual E2E test, refer the [How To Run It](#how-to-run-it) section above.
 11. **A dead-letter queue for URLs that keep failing** — A message that has failed even after its retries is parked in a separate queue, so those URLs are kept for inspection rather than silently dropped.
 12. **Extensible request middleware** — A middleware seam applies headers to every request. The shipped one is a simple static header set, but the same seam takes auth, cookies or per-tenant headers by adding one class.
 13. **Indexes on the database for faster queries** — Composite indexes over the state and time columns keep the query that picks the next URLs to crawl fast as the row count grows.
+14. **One HTTP session for the whole run** — The fetcher builds its `aiohttp` session on the first request and reuses it for every call after, so connections are pooled and kept alive instead of a fresh TCP handshake being made per page.
 
 
 ## Extensions and Improvement opportunities
